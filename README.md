@@ -38,16 +38,14 @@ SkillFlow is evaluated across question answering, mathematical reasoning, code g
 
 <table>
 <tr>
-<td width="50%"><img src="assets/figures/skillflow_pass_at_k.png" alt="Pass@K and diversity"></td>
-<td width="50%"><img src="assets/figures/skillflow_reward_curves.png" alt="Reward curves"></td>
+<td width="33%"><img src="assets/figures/skillflow_pass_at_k.png" alt="Pass@K and diversity"></td>
+<td width="33%"><img src="assets/figures/skillflow_reward_curves.png" alt="Reward curves"></td>
+<td width="33%"><img src="assets/figures/skillflow_cost_tokens.png" alt="Training and token cost"></td>
 </tr>
 <tr>
-<td width="50%"><img src="assets/figures/skillflow_cost_tokens.png" alt="Training and token cost"></td>
-<td width="50%"><img src="assets/figures/skillflow_evolution_timing.png" alt="Evolution timing"></td>
-</tr>
-<tr>
-<td width="50%"><img src="assets/figures/skillflow_transfer_reward_curve.png" alt="Transfer reward curve"></td>
-<td width="50%"><img src="assets/figures/skillflow_transfer_loss_curve.png" alt="Transfer loss curve"></td>
+<td width="33%"><img src="assets/figures/skillflow_evolution_timing.png" alt="Evolution timing"></td>
+<td width="33%"><img src="assets/figures/skillflow_transfer_reward_curve.png" alt="Transfer reward curve"></td>
+<td width="33%"><img src="assets/figures/skillflow_transfer_loss_curve.png" alt="Transfer loss curve"></td>
 </tr>
 </table>
 
