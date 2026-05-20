@@ -1,0 +1,89 @@
+# SkillFlow 训练配置
+# 用法: python run_training.py --config configs/skillflow.yaml
+
+training:
+  algorithm: gflownet_ttb
+  exp_name: skillflow_general
+
+  # ── 模型路径 ──────────────────────────────────────────────
+  # Set this to a local HF model path or model id before training.
+  base_model: "${SKILLFLOW_BASE_MODEL:-Qwen/Qwen3.5-9B}"   # π_θ + P_φ base
+
+  use_lora: true
+  lora_rank: 64                   # v5.4: 32→64 给 LoRA 更多 capacity（literature agent RL 标准）
+  lora_alpha: 128                 # alpha/rank = 2.0 保持
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  backward_lora_rank: 16          # P_φ 轻量化
+
+  device: "cuda:1"                       # 主训练 GPU
+  extra_device: "cuda:3"
+  kl_coeff: 0.01                         # KL(π_θ||π_ref) 正则化
+
+  # ── GFlowNet TTB 超参 ────────────────────────────────────
+  beta: 1.0                       # β=1: 曲线平滑, 配合 LoRA sync 修复后可长期稳定训练
+  epsilon_min: 0.1                # 标准设置
+  ttb_edge_normalization: "per_token"  # 论文 Def B.2: log p̃(a_t)=(1/K_t)Σ log p(tok)
+  ttb_length_normalization: "steps"    # 论文 Eq.13: L=(Δ/T)^2
+  reward_mode: "outcome_only"          # 论文附录: outcome-based R(τ)∈[0,1]
+  skill_mode: "policy_action"          # 论文主文: skill 是 supervisor 显式 action
+
+  # ── 技能进化（论文 §4.4 Eq.13）────────────────────────────
+  flow_entropy_threshold: 0.85    # δ_H（H_ratio < 0.85 才触发，需真正的 flow 塌缩）
+  evolution_phase_steps: 10       # 每 10 步检查一次进化（冷却期）
+  experience_evolution_threshold: 16  # 首次进化需积累 16 个 distinct experience
+  min_trajs_for_evolution: 24         # 1 步即可触发，TTB should_evolve() 自行决定是否真正进化
+  prune_threshold: -10.0          # δ_prune（log F̂(s) 低于此值的技能考虑剪枝）
+  min_usage_before_prune: 20      # N_prune（低 flow 剪枝的最少使用次数）
+  max_skills_total: 60            # B_max（技能库上限）
+  cgf_G_threshold: 0.0            # Φ^G_thr
+  cgf_J_threshold: 1.0            # Φ^J_thr
+  cgf_K_minus: 2                  # K^-: 连续负 Λ̃ 次数后进入 D^-
+  plateau_window_size: 10         # Appendix F.1: W
+  plateau_rho: 0.05               # Appendix F.1: relative Δ² decrease threshold ρ
+  plateau_m_consecutive: 2        # Appendix F.1: M consecutive plateau windows
+  zeta_trig: 1.0                  # Appendix F.4: trigger threshold on log I(t)
+
+  # ── Genesis ──────────────────────────────────────────────
+  genesis_count: 0                # S₀=∅ → 不预生成技能，从轨迹中自动发现
+  genesis_explore_episodes: 0     # 自举前探索轨迹数（>0 则先跑 base model 高温探索）
+                                  # 论文合规值 64；0 = 跳过探索（加快调试速度）
+  genesis_explore_temperature: 0.95  # 探索阶段 Supervisor 采样温度（高温 = 多样性最大）
+
+  # ── vLLM API ─────────────────────────────────────────────
+  # Supervisor π_θ（可训练，Qwen3-8B + θ-LoRA）
+  supervisor_api_base: "http://127.0.0.1:8005/v1"
+  supervisor_model: "supervisor_theta:theta_live"  # LoRA hot-swap 模式
+
+  # M_exec（冻结，本地 Qwen3.5-9B on GPU 0, thinking disabled）
+  executor_api_base: "http://127.0.0.1:8007/v1"
+  executor_model: "${SKILLFLOW_EXECUTOR_MODEL:-Qwen/Qwen3.5-9B}"
+  # Leave empty to read MEXEC_API_KEY or SGLANG_API_KEY from the environment.
+  executor_api_key: ""
+
+  # ── 训练循环 ─────────────────────────────────────────────
+  max_steps: 300
+  batch_size: 28                  # 7 unique questions × 4 trajectories (reduced from 56)
+  n_trajectories_per_question: 4  # 每个问题采样 4 条轨迹
+                                  # → Z(q) 在同问题轨迹间共享，TTB 真正做 flow matching
+                                  # → P_φ 从成功/失败对比中学习 credit assignment
+                                  # → 4条轨迹比2条有更好的 flow 估计和对比信号
+  max_episode_steps: 12           # T_max（SWE-bench 有效编辑通常在前 8 步）
+  rollout_workers: 28             # 并行线程数 = batch_size
+  learning_rate: 1.0e-4            # v5.5a: 3e-4 → 1e-4（literature agent RL standard, 防 Z_head 漂移）
+  max_grad_norm: 3.0              # v5.5a: 8.0 → 3.0（仍 2× v5.3, 但远比 v5.4 安全）
+  save_every: 10                   # v10: 每 10 步 checkpoint 便于恢复
+  sync_lora_every: 1              # 每步同步 θ-LoRA 到 vLLM（实时更新）
+  seed_offset: 7                   # v10 retry4: 改变 data shuffle 种子 (42 → 42+7*131=959)
+
+  # ── 输出 ─────────────────────────────────────────────────
+  output_dir: "outputs/skillflow_general"
+
+  # ── 数据 ─────────────────────────────────────────────────
+  train_data: "data/train_v3.json"
+  val_data: "data/test_iid_v3.json"
+
+  # ── 调试 ─────────────────────────────────────────────────
+  log_level: "INFO"
+  dump_trajectories: true         # 是否保存详细轨迹 JSONL
+  max_obs_chars: 0                # 0 = 不截断 M_exec 输出
+  max_context_chars: 0            # 0 = 不截断 Supervisor prompt

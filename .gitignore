@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training artifacts (DO NOT push)
+outputs/
+wandb/
+checkpoints/
+checkpoint*/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+backups/
+.backups/
+archive/
+
+# Secrets
+.secrets/
+.env*
+!.env.example
+configs/*api*key*.json
+configs/*secret*.json
+*credential*.json
+*.key
+*.pem
+
+# Local configs
+*.local
+local_*.yaml
+local_*.json
+
+# Logs
+*.log
+*.log.*
+
+# Backups (.bak files)
+*.bak
+*.bak.*
+*.bak_*
+
+# Temporary
+tmp/
+temp/
+.cache/
+
+# Generated datasets (keep scripts/README, not local generated splits)
+data/train*.json
+data/test*.json
+data/*_local.json
