@@ -1,21 +1,66 @@
+<div align="center">
+
 # SkillFlow
 
-Flow-driven recursive skill evolution for agentic orchestration.
+### Flow-Driven Recursive Skill Evolution for Agentic Orchestration
 
-SkillFlow trains a tool-using LLM supervisor to solve multi-step tasks while growing a reusable skill library from its own trajectories. The method is described in arXiv:2605.14089, "SkillFlow: Flow-Driven Recursive Skill Evolution for Agentic Orchestration".
+SkillFlow trains a tool-using LLM supervisor with flow matching, backward credit assignment, and a self-evolving skill library.
+
+<a href="https://arxiv.org/abs/2605.14089">arXiv:2605.14089</a> · <a href="https://arxiv.org/pdf/2605.14089">PDF</a> · <a href="#quick-start">Quick Start</a> · <a href="#method-to-code-map">Code Map</a>
+
+<img src="assets/figures/skillflow_teaser.png" alt="SkillFlow teaser" width="88%">
+
+</div>
 
 ## Overview
 
-SkillFlow is built around four components:
+SkillFlow addresses three bottlenecks in agentic orchestration: strategy collapse under reward maximization, high-variance and opaque credit assignment, and unguided skill-library updates. The framework combines a trainable Supervisor, a frozen Executor, a learned backward policy, and a dynamic skill workspace. Tempered Trajectory Balance turns terminal outcome reward into trajectory-level flow supervision, while the learned backward policy exposes per-step diagnostic signals used to evolve skills.
 
-- a trainable Supervisor policy `π_θ` that chooses orchestration actions;
-- a frozen Executor `M_exec` that carries out delegated reasoning, coding, search, and environment actions;
-- a backward policy `P_φ` learned jointly with the forward policy for per-step credit assignment;
-- a dynamic skill library that can add, update, retain, or prune skills during training.
+<div align="center">
+  <img src="assets/figures/skillflow_framework.png" alt="SkillFlow framework comparison" width="95%">
+</div>
 
-The training objective is Tempered Trajectory Balance. It matches trajectory flow to smoothed outcome reward while using per-token-normalized edge log probabilities. The same flow quantities produce interpretable step scores such as `I(t)=π_θ/P_φ` and marginal skill flow estimates. These signals are then used by the recursive skill-evolution loop to decide when evolution is needed and which decisions should become reusable skills.
+## Architecture
 
-## Repository layout
+During rollout, the Supervisor selects actions such as tool calls, environment actions, skill invocation, and answer submission. The Executor performs delegated reasoning or tool execution. Training jointly updates the forward policy, backward policy, and partition head using TTB. At phase boundaries, flow diagnostics determine when to evolve the skill library, where decision gaps appear, and what skill edits should be made.
+
+<div align="center">
+  <img src="assets/figures/skillflow_architecture.png" alt="SkillFlow architecture" width="95%">
+</div>
+
+## Results and Diagnostics
+
+SkillFlow is evaluated across question answering, mathematical reasoning, code generation, scientific QA, and interactive decision-making settings. The figures below summarize transfer behavior, pass@K/diversity, training reward curves, cost, and evolution timing from the arXiv manuscript.
+
+<div align="center">
+  <img src="assets/figures/skillflow_transfer_bars.png" alt="SkillFlow transfer performance by task type" width="95%">
+</div>
+
+<table>
+<tr>
+<td width="50%"><img src="assets/figures/skillflow_pass_at_k.png" alt="Pass@K and diversity"></td>
+<td width="50%"><img src="assets/figures/skillflow_reward_curves.png" alt="Reward curves"></td>
+</tr>
+<tr>
+<td width="50%"><img src="assets/figures/skillflow_cost_tokens.png" alt="Training and token cost"></td>
+<td width="50%"><img src="assets/figures/skillflow_evolution_timing.png" alt="Evolution timing"></td>
+</tr>
+<tr>
+<td width="50%"><img src="assets/figures/skillflow_transfer_reward_curve.png" alt="Transfer reward curve"></td>
+<td width="50%"><img src="assets/figures/skillflow_transfer_loss_curve.png" alt="Transfer loss curve"></td>
+</tr>
+</table>
+
+## Key Features
+
+- Tempered Trajectory Balance for reward-proportional trajectory flow matching.
+- Learned backward policy for transparent per-step credit assignment.
+- Skill invocation as a first-class Supervisor action.
+- Flow-driven recursive skill evolution using plateau triggers and curation signals.
+- Outcome-only reward smoothing aligned with the manuscript formulation.
+- LoRA-based Supervisor training with OpenAI-compatible local inference services.
+
+## Repository Layout
 
 ```text
 configs/skillflow.yaml          main training configuration
@@ -30,9 +75,10 @@ src/executor/m_exec.py          frozen executor API wrapper
 src/skills/                    skill format, workspace, and skill creator
 data/prepare_v3.py              dataset preparation script
 scripts/                        utility scripts
+assets/figures/                 arXiv figures used in this README
 ```
 
-## Environment setup
+## Environment Setup
 
 ```bash
 git clone https://github.com/beita6969/SkillFlow.git
@@ -43,7 +89,7 @@ conda activate skillflow
 pip install -r requirements.txt
 ```
 
-For local OpenAI-compatible SGLang services, set:
+Set local service variables:
 
 ```bash
 export SGLANG_API_KEY=EMPTY
@@ -51,7 +97,7 @@ export SKILLFLOW_BASE_MODEL=/path/to/supervisor/base/model
 export SKILLFLOW_EXECUTOR_MODEL=m_exec
 ```
 
-If the Skill Creator LLM is served separately, set:
+If the Skill Creator LLM is served separately:
 
 ```bash
 export SKILL_CREATOR_API_BASE=http://127.0.0.1:3456/v1/messages
@@ -59,7 +105,7 @@ export SKILL_CREATOR_MODEL=skill-creator-model
 export SKILL_CREATOR_API_KEY=EMPTY
 ```
 
-## Data format
+## Data Format
 
 `configs/skillflow.yaml` expects:
 
@@ -82,18 +128,18 @@ Each item should follow this schema:
 }
 ```
 
-Supported task types include:
+Supported task types:
 
 ```text
 multi_hop_qa, factual_qa, fact_checking, math_reasoning,
 strategy_qa, code_generation, science_qa, interactive_agent
 ```
 
-If the configured train file is absent, `run_training.py` creates a minimal fallback dataset so the pipeline can be checked end to end.
+If the configured training file is absent, `run_training.py` creates a minimal fallback dataset so the pipeline can be checked end to end.
 
-## Start the executor service
+## Quick Start
 
-The trainer starts the Supervisor SGLang process internally for LoRA hot swapping. The frozen Executor should be started before training. One local SGLang executor can be launched as:
+Start a frozen Executor service:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
@@ -107,25 +153,10 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
   --trust-remote-code
 ```
 
-Then check connectivity:
+Check connectivity:
 
 ```bash
 python run_training.py --config configs/skillflow.yaml --test-connectivity
-```
-
-## Start training
-
-Edit `configs/skillflow.yaml` for your GPU layout, data paths, model path, and batch size. Important fields are:
-
-```yaml
-base_model: "${SKILLFLOW_BASE_MODEL:-Qwen/Qwen3.5-9B}"
-supervisor_api_base: "http://127.0.0.1:8005/v1"
-executor_api_base: "http://127.0.0.1:8007/v1"
-executor_model: "${SKILLFLOW_EXECUTOR_MODEL:-Qwen/Qwen3.5-9B}"
-reward_mode: "outcome_only"
-skill_mode: "policy_action"
-ttb_edge_normalization: "per_token"
-ttb_length_normalization: "steps"
 ```
 
 Run a short training check:
@@ -161,6 +192,23 @@ python run_training.py \
   --genesis-only
 ```
 
+## Important Configuration Fields
+
+```yaml
+base_model: "${SKILLFLOW_BASE_MODEL:-Qwen/Qwen3.5-9B}"
+supervisor_api_base: "http://127.0.0.1:8005/v1"
+executor_api_base: "http://127.0.0.1:8007/v1"
+executor_model: "${SKILLFLOW_EXECUTOR_MODEL:-Qwen/Qwen3.5-9B}"
+reward_mode: "outcome_only"
+skill_mode: "policy_action"
+ttb_edge_normalization: "per_token"
+ttb_length_normalization: "steps"
+plateau_window_size: 10
+plateau_rho: 0.05
+plateau_m_consecutive: 2
+zeta_trig: 1.0
+```
+
 ## Outputs
 
 By default, training writes to:
@@ -169,7 +217,7 @@ By default, training writes to:
 outputs/skillflow_general/
 ```
 
-Important outputs include:
+Important outputs:
 
 ```text
 training_log.jsonl                 scalar logs and evolution events
@@ -178,7 +226,7 @@ skills/                            evolving skill workspace
 checkpoint_step_XXXX/              model, LoRA, and optimizer checkpoints
 ```
 
-## Method-to-code map
+## Method-to-Code Map
 
 | Method concept | Code |
 | --- | --- |
