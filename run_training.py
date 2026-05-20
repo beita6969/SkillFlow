@@ -182,7 +182,7 @@ def main() -> None:
 
     if not Path(train_path).exists():
         logger.warning(f"Train data not found: {train_path}. Run --prepare-data-only first.")
-        logger.info("Creating minimal test data for smoke test...")
+        logger.info("Creating minimal fallback data...")
         train_data = _create_test_data()
         val_data = _create_test_data(n=10)
     else:

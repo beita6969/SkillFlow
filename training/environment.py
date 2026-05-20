@@ -1235,8 +1235,8 @@ class GenericTaskEnvironment:
             instruction=exec_prompt, context=tip_ctx, task_type=self._task_type,
             max_tokens=4096,
         )
-        logger.info(
-            f"[DEBUG python_execute] === RAW RESPONSE ({len(raw_code)} chars) ===\n"
+        logger.debug(
+            f"[python_execute] raw response ({len(raw_code)} chars):\n"
             f"{raw_code[:500]}\n=== END ==="
         )
         code = self._extract_code_block(raw_code)
