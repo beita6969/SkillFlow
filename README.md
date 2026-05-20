@@ -2,12 +2,6 @@
 
 > Trajectory-Balance GFlowNet for autonomous skill discovery and evolution in LLM agents.
 
-[![Status](https://img.shields.io/badge/status-WIP-yellow)]()
-[![Paper](https://img.shields.io/badge/paper-NeurIPS%202026-blue)]()
-[![License](https://img.shields.io/badge/license-MIT-green)]()
-
----
-
 ## 🚧 Repo Placeholder
 
 This repository will host the official codebase, training logs, and evaluation
