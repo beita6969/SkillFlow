@@ -6,8 +6,6 @@
 
 SkillFlow trains a tool-using LLM supervisor with flow matching, backward credit assignment, and a self-evolving skill library.
 
-<a href="https://arxiv.org/abs/2605.14089">arXiv:2605.14089</a> · <a href="https://arxiv.org/pdf/2605.14089">PDF</a> · <a href="#quick-start">Quick Start</a> · <a href="#method-to-code-map">Code Map</a>
-
 <img src="assets/figures/skillflow_teaser.png" alt="SkillFlow teaser" width="88%">
 
 </div>
