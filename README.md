@@ -236,17 +236,3 @@ checkpoint_step_XXXX/              model, LoRA, and optimizer checkpoints
 | Skill-as-action interface | `skill_invoke` support in `training/environment.py` and `training/batch_inference.py` |
 | Plateau-triggered evolution | `PlateauDetector` and `_try_evolve` |
 | CGF / D-R-U skill curation | `training/skill_evolution.py`, `src/skills/skill_creator.py` |
-
-## Citation
-
-```bibtex
-@misc{zhang2026skillflow,
-  title={SkillFlow: Flow-Driven Recursive Skill Evolution for Agentic Orchestration},
-  author={Mingda Zhang and Tiesunlong Shen and Haoran Luo and Wenjin Liu and Zikai Xiao and Erik Cambria and Xiaoying Tang},
-  year={2026},
-  eprint={2605.14089},
-  archivePrefix={arXiv},
-  primaryClass={cs.AI},
-  url={https://arxiv.org/abs/2605.14089}
-}
-```
