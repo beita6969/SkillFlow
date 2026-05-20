@@ -1,16 +1,4 @@
 #!/bin/bash
-# restart_sglang.sh — kill all SGLang servers and relaunch with same config
-#
-# Usage:
-#   ./scripts/restart_sglang.sh                  # restart with current (non-deterministic) config
-#   ./scripts/restart_sglang.sh --deterministic  # restart with --enable-deterministic-inference
-#   ./scripts/restart_sglang.sh --quick          # skip warmup wait
-#
-# Default config (matches what's currently running):
-#   port 8100 (GPU 0): supervisor + theta_ckpt110 LoRA
-#   port 8101 (GPU 1): m_exec
-#   port 8102 (GPU 2): m_exec
-#   port 8103 (GPU 3): m_exec
 
 set -u
 
@@ -44,14 +32,8 @@ for arg in "$@"; do
   esac
 done
 
-# ─────────────────────────────────────────────────────────────────
-# Step 1: kill existing SGLang servers
-# ─────────────────────────────────────────────────────────────────
 echo ""
 echo "================ STEP 1: KILL ================"
-# Restrict matches to real Python SGLang launchers. Plain `pgrep -f
-# sglang.launch_server` can accidentally match wrapper/diagnostic shells whose
-# command text contains that string.
 PIDS=$(pgrep -f "$PYBIN -m sglang.launch_server" || true)
 if [ -n "$PIDS" ]; then
   echo "[kill] found SGLang launchers: $PIDS"
@@ -71,7 +53,6 @@ else
   echo "[kill] no SGLang servers running"
 fi
 
-# Wait for GPU memory to fully release
 echo "[gpu] waiting 15s for GPU memory release..."
 sleep 15
 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader 2>/dev/null | head -4
@@ -83,9 +64,6 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   fi
 fi
 
-# ─────────────────────────────────────────────────────────────────
-# Step 2: backup old logs
-# ─────────────────────────────────────────────────────────────────
 echo ""
 echo "================ STEP 2: BACKUP LOGS ================"
 mkdir -p "$LOG_DIR/sglang_logs_archive"
@@ -96,9 +74,6 @@ for log in sglang_supervisor.log sglang_mexec_8101.log sglang_mexec_8102.log sgl
   fi
 done
 
-# ─────────────────────────────────────────────────────────────────
-# Step 3: launch supervisor (GPU 0, with LoRA)
-# ─────────────────────────────────────────────────────────────────
 echo ""
 echo "================ STEP 3: LAUNCH SUPERVISOR (port 8100, GPU 0) ================"
 CUDA_VISIBLE_DEVICES=0 setsid nohup $PYBIN -m sglang.launch_server \
@@ -124,9 +99,6 @@ CUDA_VISIBLE_DEVICES=0 setsid nohup $PYBIN -m sglang.launch_server \
 SUPERVISOR_PID=$!
 echo "[launch] supervisor PID=$SUPERVISOR_PID → $LOG_DIR/sglang_supervisor.log"
 
-# ─────────────────────────────────────────────────────────────────
-# Step 4: launch 3 m_exec workers (GPU 1/2/3, no LoRA)
-# ─────────────────────────────────────────────────────────────────
 echo ""
 echo "================ STEP 4: LAUNCH M_EXEC × 3 ================"
 declare -A MEXEC_PIDS
@@ -152,9 +124,6 @@ for i in 1 2 3; do
   echo "[launch] m_exec port=$port GPU=$gpu PID=$pid → $LOG_DIR/sglang_mexec_${port}.log"
 done
 
-# ─────────────────────────────────────────────────────────────────
-# Step 5: wait for warmup (poll /v1/models on each)
-# ─────────────────────────────────────────────────────────────────
 if [ "$SKIP_WARMUP" = "0" ]; then
   echo ""
   echo "================ STEP 5: WAIT FOR READY ================"
@@ -196,9 +165,6 @@ if [ "$SKIP_WARMUP" = "0" ]; then
   done
 fi
 
-# ─────────────────────────────────────────────────────────────────
-# Step 6: report final status
-# ─────────────────────────────────────────────────────────────────
 echo ""
 echo "================ STEP 6: STATUS ================"
 echo "live SGLang processes:"

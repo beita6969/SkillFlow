@@ -1,14 +1,6 @@
-"""
-Human-curated Strategy Guides — 最小化技能模板。
 
-设计原则：
-1. 每条 < 80 words（不是 1253 words）
-2. 只写关键决策点，不写模型已知的常识
-3. 注重 pitfall（避坑），不重复 system prompt 中已有的 workflow
-4. 可以被训练中的自动 Living Doc 覆盖（但作为高质量 baseline）
-"""
 
-# 每个 task_type 的极简策略 — 只写"非显而易见"的关键信息
+
 CURATED_STRATEGIES = {
     "multi_hop_qa": (
         "Chain entities step by step: search entity A → extract link to B → search B → answer.\n"

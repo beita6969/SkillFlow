@@ -1,23 +1,5 @@
-"""
-Per-task-type system prompts and tool configurations.
 
-Each task_type has:
-- system_prompt: tailored role description + rules
-- tools: list of task tools the model should see (answer auto-added).
-  In paper-aligned `skill_mode=policy_action`, environment adds skill_invoke
-  dynamically when the skill library is non-empty; legacy prompt-injection mode
-  keeps tips in the system prompt instead.
 
-v7 重构: answer 是正规工具 (action_type="answer" via tool call with 'response' arg)。
-       不再使用 <answer>X</answer> 文本标签。
-       动态过滤: trajectory 未用过工具前, answer tool 不在列表中 (rollout 层)。
-
-WebShop/ALFWorld use ReAct text format (react_prompts.py), not tool calling.
-"""
-
-# ═══════════════════════════════════════════════════════
-# code_generation (SWE-bench) — SWE-agent ACI style
-# ═══════════════════════════════════════════════════════
 
 CODE_GENERATION = {
     "max_episode_steps": 28,
@@ -39,13 +21,10 @@ CODE_GENERATION = {
     "tools": [
         "search_code", "view_file", "edit_file",
         "list_files",
-        # code eval uses workspace diff; answer tool is intentionally hidden.
+
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-# math_reasoning (GSM8K / MATH) — PAL style
-# ═══════════════════════════════════════════════════════
 
 MATH_REASONING = {
     "max_episode_steps": 8,
@@ -61,9 +40,6 @@ MATH_REASONING = {
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-# multi_hop_qa (HotPotQA) — ReAct search chain
-# ═══════════════════════════════════════════════════════
 
 MULTI_HOP_QA = {
     "max_episode_steps": 6,
@@ -79,9 +55,6 @@ MULTI_HOP_QA = {
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-# factual_qa (TriviaQA / NQ) — RAG retrieval
-# ═══════════════════════════════════════════════════════
 
 FACTUAL_QA = {
     "max_episode_steps": 5,
@@ -95,9 +68,6 @@ FACTUAL_QA = {
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-# science_qa (MedQA / MMLU-Medical) — Medical RAG
-# ═══════════════════════════════════════════════════════
 
 SCIENCE_QA = {
     "max_episode_steps": 8,
@@ -113,10 +83,6 @@ SCIENCE_QA = {
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-# webshop / alfworld — ReAct text format (no tool calling)
-# Prompts managed by training/react_prompts.py
-# ═══════════════════════════════════════════════════════
 
 WEBSHOP = {
     "max_episode_steps": 10,
@@ -130,9 +96,6 @@ ALFWORLD = {
     "tools": [],
 }
 
-# ═══════════════════════════════════════════════════════
-# Registry
-# ═══════════════════════════════════════════════════════
 
 TASK_CONFIGS = {
     "code_generation": CODE_GENERATION,

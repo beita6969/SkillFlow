@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Merge a PEFT LoRA adapter and convert the saved model layout for SGLang.
 
-Qwen3.5-9B in this workspace serves correctly in SGLang when the merged
-weights use the base model's multimodal config sidecar files and shard names
-like `model.safetensors-00001-of-00005.safetensors`.  A vanilla Transformers
-text merge saves `model-00001-of-00005.safetensors` and a text-only config,
-which SGLang did not accept in the GRPO step-500 run.  This script performs
-both steps deterministically.
-"""
 
 from __future__ import annotations
 
@@ -56,8 +48,8 @@ def convert_weight_files(text_dir: Path, sglang_dir: Path) -> dict:
         src = text_dir / fname
         if not src.exists():
             raise FileNotFoundError(src)
-        # Transformers commonly writes model-00001-of-00005.safetensors; SGLang
-        # in this workspace accepted model.safetensors-00001-of-00005.safetensors.
+
+
         new_name = re.sub(r"^model-", "model.safetensors-", fname)
         new_name = re.sub(r"^pytorch_model-", "model.safetensors-", new_name)
         dst = sglang_dir / new_name
@@ -122,7 +114,7 @@ def main() -> None:
     print("[convert] copying sidecars and converting shard filenames...", flush=True)
     copy_non_weight_sidecars(base, sglang_dir, overwrite=True)
     copy_non_weight_sidecars(merged_text, sglang_dir, overwrite=True)
-    # Keep the base multimodal config that SGLang expects for this Qwen3.5 build.
+
     for fname in ("config.json", "preprocessor_config.json", "video_preprocessor_config.json", "merges.txt", "vocab.json"):
         src = base / fname
         if src.exists():

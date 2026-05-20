@@ -1,24 +1,4 @@
-"""
-SWE-bench Eval Client — 对接新版 async 评估服务器。
 
-服务器: http://35.225.163.1 (v2 high-performance, docker-based)
-
-Flow:
-  1. POST /evaluate {"predictions": [...], "max_workers": N, "dataset": ...}
-     → 返回 {"task_id": ..., "status": "queued"}
-  2. GET /result/<task_id>?timeout=N
-     → 返回 {"result": {"stdout_tail": ..., "returncode": ..., "status": "completed"}, ...}
-  3. Parse stdout_tail 里的 "Instances resolved: N" / "Instances submitted: N"
-
-注意：
-- 单个 eval 用 batch-of-1 格式（单个 /evaluate 端点有 server bug）
-- eval_results 字段固定为 null（server bug），依靠 stdout_tail 解析
-
-Usage:
-    from training.swebench_client import SWEBenchEvalClient
-    client = SWEBenchEvalClient()
-    resolved = client.evaluate(instance_id, model_patch)  # 1.0 / 0.0 / None
-"""
 
 import hashlib
 import logging
@@ -38,7 +18,7 @@ DEFAULT_MODEL_NAME = "skillflow"
 
 
 def _parse_stdout(stdout: str) -> Dict[str, int]:
-    """Parse SWE-bench harness stdout 找 resolved / submitted / error counts."""
+
     result = {"resolved": 0, "unresolved": 0, "error": 0, "total": 0, "empty": 0}
     for line in stdout.split("\n"):
         m = re.search(r"Instances resolved:\s*(\d+)", line)
@@ -75,11 +55,8 @@ class SWEBenchEvalClient:
         self.model_name = model_name
         self._cache: Dict[str, float] = {}
         self._cache_lock = threading.Lock()
-        # requests.Session keeps connection/cookie state and is not a good
-        # object to share across concurrent ThreadPool workers.  SWE eval runs
-        # can submit/poll several batch-of-1 jobs at the same time, so each
-        # caller thread gets its own Session while still sharing the result
-        # cache above.
+
+
         self._thread_local = threading.local()
         self.single_eval_max_workers = self._coerce_int_env(
             "SKILLFLOW_SWE_SERVER_MAX_WORKERS",
@@ -97,12 +74,7 @@ class SWEBenchEvalClient:
             return default
 
     def _monitor(self, message: str, level: str = "info") -> None:
-        """Log and optionally print server-eval state for live supervision.
 
-        The print is deliberately controlled by SWE_CLIENT_PRINT and contains
-        only submission/polling metadata (task id, worker count, resolved
-        status). It does not expose evaluator-only artifacts.
-        """
         if level == "warning":
             logger.warning(message)
         else:
@@ -111,7 +83,7 @@ class SWEBenchEvalClient:
             print(message, flush=True)
 
     def health(self) -> bool:
-        """Check if eval server is up."""
+
         try:
             resp = self._session().get(f"{self.api_url}/health", timeout=5)
             return resp.status_code == 200
@@ -119,7 +91,7 @@ class SWEBenchEvalClient:
             return False
 
     def queue(self) -> Dict:
-        """Current queue status (active / reserved tasks)."""
+
         try:
             resp = self._session().get(f"{self.api_url}/queue", timeout=5)
             if resp.status_code == 200:
@@ -137,7 +109,7 @@ class SWEBenchEvalClient:
         return sess
 
     def _submit_batch(self, predictions: List[Dict], max_workers: int = 10) -> Optional[str]:
-        """Submit predictions to server, return task_id or None."""
+
         try:
             resp = self._session().post(
                 f"{self.api_url}/evaluate",
@@ -164,19 +136,14 @@ class SWEBenchEvalClient:
             return None
 
     def _fetch_result(self, task_id: str, timeout: int) -> Optional[Dict]:
-        """Fetch result with polling. Returns result dict or None on fail/timeout.
 
-        Server 行为观测：
-        - /result/<id>?timeout=N 不真正阻塞（返回 202 即 "还在跑"）
-        - 需要自己轮询直到 200 (ready) 或超时
-        """
         deadline = time.time() + timeout
-        poll_interval = 5  # seconds
+        poll_interval = 5  
         first_poll = True
 
         while time.time() < deadline:
             try:
-                # 每次 poll 短超时（server 阻塞等待最多 N 秒），N 是剩余 deadline 和 poll_interval 中较短者
+
                 remaining = deadline - time.time()
                 server_wait = min(poll_interval * 4, max(int(remaining), 2))
                 resp = self._session().get(
@@ -194,7 +161,7 @@ class SWEBenchEvalClient:
                         return None
                     return data.get("result")
                 elif resp.status_code == 202:
-                    # 仍 queued / running — 继续轮询
+
                     if first_poll:
                         first_poll = False
                         logger.debug(f"[SWE-client] task {task_id[:12]} still running (202), polling...")
@@ -205,11 +172,8 @@ class SWEBenchEvalClient:
                     return None
 
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                # The async eval server can keep a result request open while a
-                # Docker job is still running; occasionally urllib3 reports a
-                # read timeout / connection reset even though the queued task is
-                # still valid.  Do not turn this transient transport issue into
-                # a false 0.0 reward; keep polling until the overall deadline.
+
+
                 self._monitor(
                     f"[SWE-client] transient result polling error for task "
                     f"{task_id[:12]}: {type(e).__name__}: {str(e)[:120]}; retrying"
@@ -233,13 +197,8 @@ class SWEBenchEvalClient:
         model_patch: str,
         timeout: int = 900,
     ) -> Optional[float]:
-        """
-        Evaluate a single patch (submitted as batch-of-1).
 
-        Returns:
-            1.0 if resolved, 0.0 if unresolved, None on error.
-        """
-        # Cache by (instance_id, patch_hash) — same patch → same result
+
         patch_hash = hashlib.md5(model_patch.encode()).hexdigest()[:10]
         cache_key = f"{instance_id}_{patch_hash}"
         with self._cache_lock:
@@ -250,12 +209,12 @@ class SWEBenchEvalClient:
             )
             return score
 
-        # Empty patch — skip server call
+
         if not model_patch.strip():
             logger.info(f"[SWE-client] {instance_id}: empty patch → 0.0")
             return 0.0
 
-        # Submit
+
         predictions = [{
             "instance_id": instance_id,
             "model_patch": model_patch,
@@ -265,19 +224,19 @@ class SWEBenchEvalClient:
         if not task_id:
             return None
 
-        # Fetch result (blocking)
+
         result = self._fetch_result(task_id, timeout=timeout)
         if result is None:
             return None
 
-        # Parse stdout_tail
+
         stdout = result.get("stdout_tail", "")
         parsed = _parse_stdout(stdout)
         total = parsed["total"]
         resolved = parsed["resolved"]
 
         if total == 0:
-            # 可能 server crash 或 patch 无效
+
             logger.warning(f"[SWE-client] {instance_id}: total=0, returncode={result.get('returncode')}")
             return None
 
@@ -296,18 +255,7 @@ class SWEBenchEvalClient:
         timeout: int = 600,
         max_workers: int = 10,
     ) -> Dict[str, float]:
-        """
-        Batch evaluate multiple patches in one server call.
 
-        注意：server 只在 stdout_tail 报 aggregate (resolved / total)，
-        per-instance 结果无法从 stdout 区分。因此 batch mode 只适合
-        已知同质 instances 的 aggregate 评估，不适合训练 step 级别的 reward。
-
-        For 训练 reward 用途: 每个 instance 单独 evaluate()。
-
-        Returns:
-            {cache_key: score} for each prediction (based on aggregate ratio).
-        """
         if not predictions:
             return {}
 
@@ -321,7 +269,7 @@ class SWEBenchEvalClient:
 
         stdout = result.get("stdout_tail", "")
         parsed = _parse_stdout(stdout)
-        # Aggregate ratio applied uniformly (best we can extract from stdout)
+
         total = parsed["total"]
         if total == 0:
             return {}
@@ -335,8 +283,6 @@ class SWEBenchEvalClient:
             results[f"{iid}_{patch_hash}"] = ratio
         return results
 
-
-# ── Module-level singleton ──
 
 _client: Optional[SWEBenchEvalClient] = None
 _client_lock = threading.Lock()

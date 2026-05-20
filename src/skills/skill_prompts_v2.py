@@ -1,15 +1,5 @@
-"""
-SkillFlow v2 Skill Prompts — LLM curator + 单 tip 生成。
 
-核心设计：
-1. Phase 1 (CURATE): Skill Creator LLM 审视已有 tips + 证据 → KEEP/UPDATE/DELETE/ADD 决策
-2. Phase 2 (GENERATE): 如需新 tip，单独调用生成 1 个高质量 tip
-3. 少而精：每个 task_type 目标 1-3 个 tip
-"""
 
-# ──────────────────────────────────────────────
-# 1. GENERATE_TIP_PROMPT — 从完整轨迹对比中提取 tip（legacy, 仍可用）
-# ──────────────────────────────────────────────
 
 GENERATE_TIP_PROMPT = """Compare these two trajectories for a {task_type} task and extract the KEY DIFFERENCE that made one succeed and the other fail.
 
@@ -38,10 +28,6 @@ tips:
 
 Output ONLY the YAML block. No preamble."""
 
-
-# ──────────────────────────────────────────────
-# 2. GENERATE_TIP_FROM_OBSERVATIONS_PROMPT — 从 I(t) 观察中生成 tip（v2 核心）
-# ──────────────────────────────────────────────
 
 GENERATE_TIP_FROM_OBSERVATIONS_PROMPT = """You are analyzing how an agent orchestrates tools on {task_type} tasks.
 
@@ -75,10 +61,6 @@ Rules:
 
 Output ONLY the YAML block."""
 
-
-# ──────────────────────────────────────────────
-# 2b. CURATE_TIPS_PROMPT — Skill Creator LLM 审视已有 tips + 决策（v3 核心）
-# ──────────────────────────────────────────────
 
 CURATE_TIPS_PROMPT = """You are curating the tip library for {task_type} tasks.
 A "tip" is a reusable tool-calling strategy that helps an agent solve problems.
@@ -160,10 +142,6 @@ If there are no existing tips, just decide whether a new tip is needed based on 
 Output ONLY the YAML block."""
 
 
-# ──────────────────────────────────────────────
-# 2c. GENERATE_SINGLE_TIP_PROMPT — 生成单个高质量 tip
-# ──────────────────────────────────────────────
-
 GENERATE_SINGLE_TIP_PROMPT = """You are generating ONE tip for {task_type} tasks.
 
 ## Existing tips (DO NOT duplicate)
@@ -212,10 +190,6 @@ Rules:
 
 Output ONLY the YAML block."""
 
-
-# ──────────────────────────────────────────────
-# 2d. DIAGNOSE_AND_CURATE_PROMPT — 3+2+1 融合版（v4 核心）
-# ──────────────────────────────────────────────
 
 DIAGNOSE_AND_CURATE_PROMPT = """You are curating the tip library for {task_type} tasks.
 
@@ -278,20 +252,8 @@ Rules:
 Output ONLY the YAML block."""
 
 
-# ──────────────────────────────────────────────
-# 3. 解析函数
-# ──────────────────────────────────────────────
-
 def parse_curation_verdict(text: str) -> dict:
-    """解析 Skill Creator LLM 的 curation verdict YAML。
 
-    Returns:
-        {
-            "actions": [{"action": "KEEP/UPDATE/DELETE", "skill_id": ..., ...}],
-            "needs_new_tip": bool,
-            "new_tip_focus": str,
-        }
-    """
     import re
     import yaml
 
@@ -305,7 +267,7 @@ def parse_curation_verdict(text: str) -> dict:
         if isinstance(data, dict):
             verdict = data.get("verdict", data)
             actions = verdict.get("actions", [])
-            # If any action is ADD, we don't need separate needs_new_tip
+
             has_add = any(
                 a.get("action", "").upper() == "ADD" for a in actions if isinstance(a, dict)
             )
@@ -322,16 +284,15 @@ def parse_curation_verdict(text: str) -> dict:
 
 
 def parse_single_tip(text: str):
-    """解析单个 tip YAML。Returns (description, body) or None。
-    支持多行 body (| block scalar) 和 regex fallback。"""
+
     import re
     import yaml
 
-    # 1. 尝试 YAML fenced block
+
     yaml_match = re.search(r'```(?:yaml)?\s*\n(.*?)```', text, re.DOTALL)
     yaml_text = yaml_match.group(1) if yaml_match else text
 
-    # 2. PyYAML safe_load - 支持 `body: |` block scalar
+
     try:
         data = yaml.safe_load(yaml_text)
         if isinstance(data, dict):
@@ -344,7 +305,7 @@ def parse_single_tip(text: str):
     except Exception:
         pass
 
-    # 3. 整段文本 YAML (无 fence)
+
     try:
         data = yaml.safe_load(text)
         if isinstance(data, dict):
@@ -357,9 +318,9 @@ def parse_single_tip(text: str):
     except Exception:
         pass
 
-    # 4. Regex fallback (多行 body 用 non-greedy + 检测下一个 key 或结束)
+
     desc_m = re.search(r'description:\s*["\']?(.+?)["\']?\s*\n', text)
-    # body 可能是 "body: text" 或 "body: |\n  multiline"
+
     body_m = re.search(r'body:\s*\|\s*\n(.+?)(?=\n\w+:|$)', text, re.DOTALL)
     if not body_m:
         body_m = re.search(r'body:\s*["\']?(.+?)["\']?\s*(?:\n\w+:|$)', text, re.DOTALL)
@@ -372,17 +333,13 @@ def parse_single_tip(text: str):
     return None
 
 
-# ──────────────────────────────────────────────
-# 4. 质量门控
-# ──────────────────────────────────────────────
-
 def validate_tip(trigger: str, tip: str) -> bool:
-    """质量门控：拒绝低质量 tip。"""
+
     if not trigger or not tip:
         return False
     if len(tip.split()) < 5:
         return False
-    # 太 generic（没有具体工具名）
+
     generic_phrases = [
         "use tools", "read carefully", "think step by step",
         "be careful", "double check",
@@ -393,19 +350,8 @@ def validate_tip(trigger: str, tip: str) -> bool:
     return True
 
 
-# ──────────────────────────────────────────────
-# 4. 解析 — 支持两种输出格式
-# ──────────────────────────────────────────────
-
 def parse_tips_yaml(text: str) -> list:
-    """从 LLM 输出中解析 tips YAML。
 
-    支持两种格式：
-    1. tips: [{trigger, tip}]  (旧格式，GENERATE_TIP_PROMPT)
-    2. tips: [{description, body}]  (新格式，GENERATE_TIP_FROM_OBSERVATIONS_PROMPT)
-
-    Returns: list of (description, body) tuples
-    """
     import re
     import yaml
 
@@ -424,14 +370,14 @@ def parse_tips_yaml(text: str) -> list:
         result = []
         for item in tips:
             if isinstance(item, dict):
-                # 支持两种 key 名
+
                 desc = str(item.get('description', item.get('trigger', '')))
                 body = str(item.get('body', item.get('tip', '')))
                 if validate_tip(desc, body):
                     result.append((desc, body))
         return result
     except Exception:
-        # Fallback: 正则提取
+
         triggers = re.findall(r'(?:trigger|description):\s*["\']?(.*?)["\']?\s*\n', text)
         tips = re.findall(r'(?:tip|body):\s*["\']?(.*?)["\']?\s*\n', text)
         result = []

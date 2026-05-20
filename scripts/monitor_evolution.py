@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""
-训练监控脚本 — 在每次进化后输出统计报告。
 
-用法: python scripts/monitor_evolution.py [--log-file PATH] [--verbose-log PATH]
-"""
 import argparse
 import json
 import os
@@ -27,7 +23,7 @@ def load_jsonl(path: Path):
 
 
 def compute_phase_stats(entries, phase_start, phase_end):
-    """计算某个 phase (step range) 内的统计"""
+
     phase = [e for e in entries if phase_start <= e["step"] <= phase_end]
     if not phase:
         return None
@@ -43,7 +39,7 @@ def compute_phase_stats(entries, phase_start, phase_end):
         "workspace_size": phase[-1].get("workspace_size", "?"),
     }
 
-    # Per-task reward 聚合
+
     task_rewards = defaultdict(list)
     for e in phase:
         for task, reward in e.get("task_rewards", {}).items():
@@ -52,7 +48,7 @@ def compute_phase_stats(entries, phase_start, phase_end):
         task: round(sum(rs) / len(rs), 4) for task, rs in sorted(task_rewards.items())
     }
 
-    # 趋势：前半 vs 后半
+
     if len(phase) >= 4:
         mid = len(phase) // 2
         first_half = phase[:mid]
@@ -75,7 +71,7 @@ def compute_phase_stats(entries, phase_start, phase_end):
 
 
 def extract_evolution_info(verbose_log: Path, step: int):
-    """从 verbose log 中提取进化相关信息"""
+
     info = {
         "triggered": False,
         "h_ratio": None,
@@ -90,19 +86,19 @@ def extract_evolution_info(verbose_log: Path, step: int):
     if not verbose_log or not verbose_log.exists():
         return info
 
-    # 读取 step 附近的日志
+
     try:
         with open(verbose_log, "r") as f:
             lines = f.readlines()
     except Exception:
         return info
 
-    # 查找 evolution 相关的行（step 附近）
+
     for line in lines:
         if "[Evolution]" not in line:
             continue
 
-        # 触发检查
+
         if "H_ratio=" in line and f"Step {step}" in line:
             info["triggered"] = True
             m = re.search(r"H_ratio=([\d.]+)", line)
@@ -112,7 +108,7 @@ def extract_evolution_info(verbose_log: Path, step: int):
             if m:
                 info["avg_reward_at_evolve"] = float(m.group(1))
 
-        # 进化结果
+
         if f"Step {step} complete" in line:
             m = re.search(r"\+(\d+) new skills", line)
             if m:
@@ -134,19 +130,19 @@ def extract_evolution_info(verbose_log: Path, step: int):
 
 
 def print_report(entries, verbose_log=None):
-    """打印完整报告"""
+
     if not entries:
         print("⚠ 无训练数据")
         return
 
     max_step = max(e["step"] for e in entries)
-    evolution_phase_steps = 10  # 从 config 读
+    evolution_phase_steps = 10  
 
     print("=" * 72)
     print(f"  SkillFlow Run 14 训练监控 — 当前 Step {max_step}")
     print("=" * 72)
 
-    # 全局概览
+
     print(f"\n📊 全局概览 (Step 0 → {max_step}):")
     first = entries[0]
     last = entries[-1]
@@ -156,7 +152,7 @@ def print_report(entries, verbose_log=None):
     print(f"  H_flow:      {first.get('flow_entropy', 0):.4f} → {last.get('flow_entropy', 0):.4f}")
     print(f"  skills:      {first.get('workspace_size', '?')} → {last.get('workspace_size', '?')}")
 
-    # 按进化周期分 phase
+
     phases = []
     phase_start = 0
     while phase_start <= max_step:
@@ -166,7 +162,7 @@ def print_report(entries, verbose_log=None):
             phases.append((phase_start, phase_end, stats))
         phase_start += evolution_phase_steps
 
-    # 每个 phase 的报告
+
     for i, (p_start, p_end, stats) in enumerate(phases):
         is_evolution_point = (p_end + 1) % evolution_phase_steps == 0 or p_end == max_step
         evol_step = p_end + 1 if is_evolution_point and p_end < max_step else None
@@ -185,13 +181,13 @@ def print_report(entries, verbose_log=None):
         print(f"  avg_ep_steps:  {stats['avg_steps_per_ep']:.1f}")
         print(f"  workspace:     {stats['workspace_size']} skills")
 
-        # Per-task
+
         print(f"  任务明细:")
         for task, reward in stats["task_rewards"].items():
             bar = "█" * int(reward * 10) + "░" * (10 - int(reward * 10))
             print(f"    {task:20s} {reward:.4f} |{bar}|")
 
-        # 进化详情
+
         if evol_step and evol_step <= max_step and verbose_log:
             evol_info = extract_evolution_info(verbose_log, evol_step)
             if evol_info["triggered"]:
@@ -205,7 +201,7 @@ def print_report(entries, verbose_log=None):
                 if evol_info["skills_after"]:
                     print(f"    → skills: {evol_info['skills_after']}")
 
-    # 进化前后对比
+
     evolutions_detected = []
     for step_idx in range(evolution_phase_steps, max_step + 1, evolution_phase_steps):
         if step_idx <= max_step:
@@ -217,7 +213,7 @@ def print_report(entries, verbose_log=None):
         print(f"{'=' * 60}")
 
         for evol_step in evolutions_detected:
-            # 进化前 5 步 vs 进化后 5 步
+
             pre_start = max(0, evol_step - 5)
             pre_end = evol_step - 1
             post_start = evol_step
@@ -236,7 +232,7 @@ def print_report(entries, verbose_log=None):
                 print(f"    loss:   {pre['avg_loss']:.1f} → {post['avg_loss']:.1f}  ({dl:+.1f})")
                 print(f"    skills: {pre['workspace_size']} → {post['workspace_size']}")
 
-                # 按任务对比
+
                 all_tasks = set(list(pre["task_rewards"].keys()) + list(post["task_rewards"].keys()))
                 for task in sorted(all_tasks):
                     r_pre = pre["task_rewards"].get(task, 0)
@@ -245,7 +241,7 @@ def print_report(entries, verbose_log=None):
                     arrow = "↑" if delta > 0.05 else ("↓" if delta < -0.05 else "→")
                     print(f"      {task:20s} {r_pre:.3f} → {r_post:.3f} {arrow} ({delta:+.3f})")
 
-    # 最新 5 步逐步明细
+
     print(f"\n{'─' * 60}")
     print(f"  最近 5 步逐步明细:")
     print(f"{'─' * 60}")

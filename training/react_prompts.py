@@ -1,13 +1,5 @@
-"""
-ReAct 提示模板。
 
-当前保留本项目训练时使用的 raw-action 输出协议：
-模型只输出一个动作字符串，不要求 <think>/<action> 标签。
-环境状态/历史/可选动作的组织方式参考 SkillRL/RAGEN，但不改变
-卡 0 模型已适配的输出格式。
-"""
 
-# ─────────────── WebShop ───────────────
 
 WEBSHOP_TEMPLATE_NO_HIS = """You are an expert autonomous agent operating in the WebShop e-commerce environment.
 Your task is to: {task_description}.
@@ -36,8 +28,6 @@ For click actions, copy one value from the admissible action list exactly. Do no
 """
 
 
-
-# SkillRL-style WebShop prompt variants.
 WEBSHOP_TEMPLATE_NO_HIS_SKILLRL = """
 You are an expert autonomous agent operating in the WebShop e-commerce environment. 
 Your task is to: {task_description}.
@@ -89,10 +79,7 @@ You should first reason step-by-step about the current situation, then think car
 Once you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.
 """
 
-# AgentBench/AgentRL-style single-message rendering.  The original AgentBench
-# implementation uses OpenAI tool calls plus system/user/tool messages; here we
-# keep the same visible text and legal action semantics but ask for one action
-# string because this local evaluator executes raw WebShop actions.
+
 WEBSHOP_AGENTBENCH_SYSTEM = """
 You are web shopping.
 I will give you instructions about what to do.
@@ -130,9 +117,6 @@ Available Actions:
 """
 
 
-# ─────────────── ALFWorld ───────────────
-
-# Action format example only — shows syntax, not strategy
 _ALFWORLD_EXAMPLE = """Action format examples:
 > go to cabinet 1
 > take apple 1 from countertop 1

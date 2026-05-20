@@ -1,21 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-XSkill-style Skill Prompts — 直接采用 XSkill 的设计，适配 SkillFlow 的工具和任务。
 
-三个核心 prompt：
-  1. GENERATE_SKILL_PROMPT — 从单条轨迹提取可复用的 SOP（Standard Operating Procedure）
-  2. MERGE_SKILL_PROMPT — 将多个 skill 合并为一个 per-type living document
-  3. SKILL_REFINE_PROMPT — 定期精炼，去除过于具体的内容
 
-设计原则（来自 XSkill）：
-  - "Keep It General: Use placeholders like [TARGET], [QUERY] instead of specific values"
-  - "The skill should apply to similar problems, not just this one"
-  - "Think of the global skill as a living document that grows wiser"
-"""
-
-# ──────────────────────────────────────────────
-# 1. GENERATE_SKILL_PROMPT
-# ──────────────────────────────────────────────
 
 GENERATE_SKILL_PROMPT = """You are a skilled AI agent architect. Analyze the trajectory and extract a reusable Standard Operating Procedure (SOP).
 
@@ -108,10 +92,6 @@ Use outcome/reward metadata to diagnose failure patterns (wrong format? unsuppor
 Output ONLY the SKILL.md content starting with `---`. Do NOT include any specific names, dates, numbers, or answers from the trajectories — use [PLACEHOLDER] notation instead."""
 
 
-# ──────────────────────────────────────────────
-# 2. MERGE_SKILL_PROMPT
-# ──────────────────────────────────────────────
-
 MERGE_SKILL_PROMPT = """You are a knowledge architect. Your job is to maintain a single, unified skill document for {task_type} tasks that grows wiser with each new case.
 
 ### Philosophy:
@@ -150,10 +130,6 @@ skill_invoke, think, plan, decompose, python_execute, test_code, analyze, search
 
 Output ONLY the merged SKILL.md starting with `---`. No preamble. Use [PLACEHOLDER] notation for any specific values."""
 
-
-# ──────────────────────────────────────────────
-# 3. SKILL_REFINE_PROMPT
-# ──────────────────────────────────────────────
 
 SKILL_REFINE_PROMPT = """You are a skill document architect. Refine the SKILL.md to remove redundancy, generalize specific cases, and improve structure.
 
@@ -206,10 +182,6 @@ Output ONLY the refined SKILL.md starting with `---`. No preamble.
 """
 
 
-# ──────────────────────────────────────────────
-# 4. EVOLUTION_SKILL_PROMPT — 进化时从失败轨迹生成新 skill
-# ──────────────────────────────────────────────
-
 EVOLUTION_SKILL_PROMPT = """You are a skilled AI agent architect. Analyze the trajectories and extract reusable Standard Operating Procedures (SOPs).
 
 ### Guiding Principles:
@@ -256,32 +228,21 @@ task_type: [task_type]
 Generate now:"""
 
 
-# ──────────────────────────────────────────────
-# Helper: 格式化轨迹为 XSkill 的抽象格式（隐藏具体数据）
-# ──────────────────────────────────────────────
-
 def clean_skill_output(text: str) -> str:
-    """
-    清理 M_exec 生成的 skill 文本：去除 emoji、markdown 粗体等。
-    gpt-oss-120b 倾向于用 1️⃣2️⃣3️⃣ 代替 1.2.3. — 统一替换。
-    """
+
     import re
-    # 数字 emoji (1️⃣ → 1.) — 数字+VS16+组合keycap
+
     text = re.sub(r'(\d)\uFE0F\u20E3', r'\1.', text)
-    # 星号 emoji
+
     text = text.replace('★', '*')
     text = text.replace('⭐', '*')
-    # 其他常见 emoji
+
     text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text)
     return text
 
 
 def _classify_question_subtype(task_type: str, question: str) -> str:
-    """
-    从 question 文本推断子类描述（不暴露具体内容）。
 
-    例如：math_reasoning + "geometric sequence" → "sequence/series problem with logarithmic constraints"
-    """
     q_lower = question.lower()
 
     if task_type == "math_reasoning":
@@ -321,17 +282,7 @@ def _classify_question_subtype(task_type: str, question: str) -> str:
 
 
 def format_trajectory_for_skill_generation(traj, hide_question: bool = False) -> str:
-    """
-    格式化轨迹为 XSkill 风格 — 传递完整信息，让 LLM 在 OUTPUT 端泛化。
 
-    给 LLM 看工具序列、观测摘要、final_answer 和 reward/outcome；
-    不提供 gold answer，避免训练标签进入技能库。
-
-    包含完整信息让 LLM 能诊断失败原因：
-    - 重复相同 instruction × N → 识别 dead loop
-    - final_answer 格式异常 → 识别 format mismatch
-    - search 低 similarity → 识别 retrieval failure
-    """
     lines = [
         f"Task type: {traj.task_type}",
         f"Question: {(traj.question or '')[:200]}",
@@ -340,7 +291,7 @@ def format_trajectory_for_skill_generation(traj, hide_question: bool = False) ->
         "",
     ]
 
-    # 展示每步的完整工具调用和结果（XSkill 原版传 raw trajectory）
+
     prev_instr = None
     repeat_count = 0
 
@@ -349,7 +300,7 @@ def format_trajectory_for_skill_generation(traj, hide_question: bool = False) ->
         instr = (turn.instruction or "")[:120]
         obs = (turn.observation or "")[:200]
 
-        # 检测重复动作（让 LLM 能识别 dead loop）
+
         if action == prev_instr and action not in ("skill_invoke", "accept"):
             repeat_count += 1
             if repeat_count >= 2:
@@ -359,7 +310,7 @@ def format_trajectory_for_skill_generation(traj, hide_question: bool = False) ->
             repeat_count = 0
         prev_instr = action
 
-        # 重要性标记
+
         imp = getattr(turn, "step_importance", 1.0)
         marker = "★ " if imp > 1.5 else ""
 
@@ -368,7 +319,7 @@ def format_trajectory_for_skill_generation(traj, hide_question: bool = False) ->
             lines.append(f"    → {obs}")
         lines.append("")
 
-    # 展示最终答案与 reward/outcome（不展示 gold answer）
+
     if traj.final_answer:
         lines.append(f"Final answer: {(traj.final_answer or '')[:150]}")
 
@@ -376,9 +327,7 @@ def format_trajectory_for_skill_generation(traj, hide_question: bool = False) ->
 
 
 def format_trajectory_steps_only(traj, max_steps: int = 5) -> str:
-    """
-    只展示工具使用序列（最简洁的格式，用于进化 prompt）。
-    """
+
     steps = []
     for i, turn in enumerate(traj.turns[:max_steps]):
         action = turn.action_type

@@ -1,20 +1,16 @@
-"""
-Case Study: 用 per-node flow 信号驱动 skill 生成。
-完整演示论文 §4.4 Eq.13 的 flow-driven skill evolution pipeline。
-"""
+
 import os, json
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
 from openai import OpenAI
 
-# Use a local OpenAI-compatible model for tip generation.
+
 client = OpenAI(
     base_url=os.environ.get("SKILLFLOW_EXECUTOR_API_BASE", "http://127.0.0.1:8007/v1"),
     api_key=os.environ.get("MEXEC_API_KEY") or os.environ.get("SGLANG_API_KEY", "EMPTY"),
 )
 MODEL_NAME = os.environ.get("SKILLFLOW_EXECUTOR_MODEL", "Qwen/Qwen3.5-9B")
 
-# ── Case Study Data (from case_study_swe.txt) ──
 
 task_type = "code_generation"
 tool_list = "search_code, view_file, edit_file, python_execute, run_tests, list_files, verify_fix"
@@ -26,7 +22,7 @@ existing_tip = """tip-code-generation-1775904986-0:
   flow_score: -2.30 (low — newly created, not yet validated)
   usage_count: 4, success_count: 2"""
 
-# Success trajectory (τ_3, R̃=1.48)
+
 success_evidence = """τ_3 (R̃=1.48, RESOLVED, 15 steps):
   S1:  list_files          log I(t)=+13.75 ★★ EXPLORE  — understood project structure first
   S3:  view_file           log I(t)= -1.00 → NEUTRAL   — read the target file
@@ -42,7 +38,7 @@ success_evidence = """τ_3 (R̃=1.48, RESOLVED, 15 steps):
 
   Pattern: list→view→REPRODUCE(◆◆)→search→view(◆◆)→edit→edit→edit(★★)→edit→edit"""
 
-# Failed trajectory (τ_4, R̃=0.13)
+
 failure_evidence = """τ_4 (R̃=0.13, FAILED, 15 steps):
   S1:  search_code         log I(t)=+27.50 ★★ — aggressive search
   S2:  view_file           log I(t)= -7.25 ◆◆ — read file (backward approved)
@@ -58,7 +54,7 @@ failure_evidence = """τ_4 (R̃=0.13, FAILED, 15 steps):
   Pattern: search→view→...search→search→python→search→search→edit(LINT!)→view→view
   Problem: 13 steps of exploration, only 1 edit attempt at step 13 → LINT error → no time to fix"""
 
-# Critical steps from flow analysis
+
 critical_steps = """Flow-derived critical decision points:
 
 1. τ_3 Step 4 (python_execute, log I=-20.00):
@@ -81,7 +77,7 @@ critical_steps = """Flow-derived critical decision points:
    - Forward policy was bold (π_θ >> P_φ)
    - This is the creative step that actually solved the bug"""
 
-# DAG comparisons
+
 dag_comparisons = """Same question, 4 trajectories:
   τ_3 (R̃=1.48 ✅): list→view→reproduce→search→view→edit×5 (edits from step 9)
   τ_1 (R̃=0.59 ⚠️): search→view→reproduce→edit→view→search→run_tests×6 (too much testing)
@@ -96,7 +92,7 @@ Key divergence:
 Success pattern: reproduce early (step 4) + read full context (step 8) + start editing by step 9
 Failure pattern: excessive search/view cycles consuming 80%+ of step budget"""
 
-# ── Phase 1: Curation ──
+
 print("=" * 90)
 print("PHASE 1: LLM Curator 审视已有 tip + flow 证据")
 print("=" * 90)
@@ -162,7 +158,7 @@ curation_result = resp.choices[0].message.content
 print("Curation verdict:")
 print(curation_result)
 
-# ── Phase 2: Generate new tip if needed ──
+
 print()
 print("=" * 90)
 print("PHASE 2: 基于 flow 信号生成新 tip")
@@ -235,7 +231,7 @@ tip_result = resp2.choices[0].message.content
 print("Generated tip:")
 print(tip_result)
 
-# ── Summary ──
+
 print()
 print("=" * 90)
 print("COMPLETE PIPELINE: trajectory → flow analysis → per-node credit → skill evolution")

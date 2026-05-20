@@ -1,22 +1,4 @@
-"""
-SkillFlow 训练入口。
 
-用法：
-  # 完整训练
-  python run_training.py --config configs/skillflow.yaml
-
-  # 仅数据准备
-  python run_training.py --prepare-data-only --config configs/skillflow.yaml
-
-  # 从 checkpoint 恢复
-  python run_training.py --config configs/skillflow.yaml --resume outputs/skillflow_general/checkpoint_step_0050
-
-  # 快速冒烟测试（3 步）
-  python run_training.py --config configs/skillflow.yaml --max-steps 3
-
-  # 仅测试 M_exec 连通
-  python run_training.py --config configs/skillflow.yaml --test-connectivity
-"""
 
 from __future__ import annotations
 
@@ -28,12 +10,12 @@ import re
 import sys
 from pathlib import Path
 
-# ── localhost 请求绕过代理（SGLang/M_exec 在 127.0.0.1）──
+
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
 import yaml
 
-# ALFWorld 环境变量（必须在 import alfworld 之前设置）
+
 os.environ.setdefault("ALFWORLD_DATA", os.path.expanduser("~/.cache/alfworld"))
 
 _conda_prefix = os.environ.get("CONDA_PREFIX")
@@ -47,7 +29,7 @@ if _conda_prefix:
 
 
 def _expand_config_value(value):
-    """Expand ${VAR:-default} and standard ${VAR} placeholders in YAML configs."""
+
     if isinstance(value, dict):
         return {k: _expand_config_value(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -74,24 +56,24 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def load_config(config_path: str) -> dict:
-    """加载 YAML 配置，返回展平的 dict"""
+
     with open(config_path, "r", encoding="utf-8") as f:
         raw = _expand_config_value(yaml.safe_load(f))
 
-    # 展平 training 节点
+
     if "training" in raw:
         return raw["training"]
     return raw
 
 
 def load_data(path: str) -> list:
-    """加载 JSON 数据文件"""
+
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def test_connectivity(config: dict) -> None:
-    """测试 M_exec 和 Supervisor vLLM 连通性"""
+
     from src.executor.m_exec import MExec
 
     print("Testing M_exec connectivity...")
@@ -121,7 +103,7 @@ def test_connectivity(config: dict) -> None:
 
 
 def run_genesis_only(config: dict, train_data: list) -> None:
-    """仅运行 genesis，生成初始技能集"""
+
     from src.executor.m_exec import MExec
     from src.skills.workspace import SkillWorkspace
     from src.skills.skill_creator import SkillCreator
@@ -136,7 +118,7 @@ def run_genesis_only(config: dict, train_data: list) -> None:
     workspace = SkillWorkspace(skills_dir=skills_dir, max_skills=config.get("max_skills_total", 60))
     creator = SkillCreator(m_exec=m_exec, skill_workspace=workspace)
 
-    # 种子样本
+
     by_type: dict = {}
     for q in train_data:
         tt = q.get("task_type", "unknown")
@@ -166,12 +148,12 @@ def main() -> None:
     parser.add_argument("--gpu", type=str, default=None, help="Override CUDA_VISIBLE_DEVICES")
     args = parser.parse_args()
 
-    # GPU 设置
+
     if args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
         print(f"Using GPU(s): {args.gpu}")
 
-    # 配置加载
+
     config = load_config(args.config)
     if args.max_steps is not None:
         config["max_steps"] = args.max_steps
@@ -180,12 +162,12 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     logger.info(f"Config: {config.get('exp_name', 'skillflow')}, max_steps={config.get('max_steps')}")
 
-    # 连通性测试
+
     if args.test_connectivity:
         test_connectivity(config)
         return
 
-    # 数据准备
+
     if args.prepare_data_only:
         from data.prepare_data import prepare_all
         prepare_all(
@@ -194,7 +176,7 @@ def main() -> None:
         )
         return
 
-    # 加载数据
+
     train_path = config.get("train_data", "data/train.json")
     val_path = config.get("val_data", "data/val.json")
 
@@ -209,12 +191,12 @@ def main() -> None:
 
     logger.info(f"Loaded {len(train_data)} train, {len(val_data)} val samples")
 
-    # Genesis only
+
     if args.genesis_only:
         run_genesis_only(config, train_data)
         return
 
-    # --fresh：清空旧产物，确保从零开始
+
     if args.fresh:
         import shutil
         import time
@@ -226,7 +208,7 @@ def main() -> None:
             logger.error("--fresh 和 --resume 不能同时使用")
             return
 
-        # 备份旧 skills
+
         if skills_dir.exists() and any(skills_dir.iterdir()):
             backup = output_dir / f"skills_backup_{backup_tag}"
             shutil.copytree(skills_dir, backup)
@@ -234,7 +216,7 @@ def main() -> None:
             skills_dir.mkdir()
             logger.info(f"Fresh: 旧 skills 备份到 {backup}，skills 目录已清空")
 
-        # 备份旧日志
+
         log_file = output_dir / "training_log.jsonl"
         if log_file.exists() and log_file.stat().st_size > 0:
             log_backup = output_dir / f"training_log.jsonl.bak.{backup_tag}"
@@ -242,14 +224,14 @@ def main() -> None:
             log_file.write_text("")
             logger.info(f"Fresh: 旧日志备份到 {log_backup}，日志已清空")
 
-        # 备份旧 checkpoints
+
         for ckpt in output_dir.glob("checkpoint_*"):
             ckpt_backup = output_dir / f"{ckpt.name}_backup_{backup_tag}"
             shutil.copytree(ckpt, ckpt_backup)
             shutil.rmtree(ckpt)
             logger.info(f"Fresh: {ckpt.name} 备份到 {ckpt_backup.name}")
 
-        # 备份旧 trajectory dumps
+
         dump_dir = output_dir / "trajectory_dumps"
         if dump_dir.exists() and any(dump_dir.iterdir()):
             dump_backup = output_dir / f"trajectory_dumps_backup_{backup_tag}"
@@ -259,7 +241,7 @@ def main() -> None:
 
         logger.info("Fresh: 全部旧产物已清空，将从零开始训练（genesis + 全新权重）")
 
-    # 完整训练
+
     from training.gflownet_trainer import GFlowNetTrainer
 
     trainer = GFlowNetTrainer(config=config)
@@ -272,7 +254,7 @@ def main() -> None:
 
 
 def _create_test_data(n: int = 32) -> list:
-    """创建最小测试数据（无 HuggingFace 依赖）"""
+
     samples = []
     task_types = [
         ("multi_hop_qa", "What is the capital of the country that borders France to the north?", "Belgium"),

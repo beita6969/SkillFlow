@@ -1,20 +1,4 @@
-"""
-GenericTaskEnvironment — SkillFlow 通用任务环境（multi-turn tool calling）。
 
-Supervisor ↔ M_exec 交互循环：
-  - 工具定义通过 API tools 参数传入（非 system prompt 文本）
-  - 标准多轮消息：system → user → assistant(tool_call) → tool(result) → assistant...
-  - Supervisor 输出 tool call → dispatch_tool → observation → append to messages
-  - Supervisor 输出纯文本（无 tool call）→ 最终答案 → episode 结束
-  - 无 two-pass thinking，无 accept 工具，消息列表即为历史
-
-Episode 流程：
-  reset(question) → messages (List[Dict])
-  loop:
-    content, tool_name, tool_args = supervisor_call(messages, ...)
-    reward, done, info = env.step(content, tool_name, tool_args, traj)
-    if done: break
-"""
 
 from __future__ import annotations
 
@@ -34,53 +18,44 @@ from training.trajectory import Trajectory, Turn
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────
-# Action 空间（simplified: no parsing needed, tool_name comes from API）
-# ──────────────────────────────────────────────────────
 
 _VALID_ACTION_TYPES = {
-    # 推理
+
     "plan", "decompose",
-    # 计算
+
     "python_execute", "test_code", "analyze",
-    # 检索
+
     "search", "lookup", "fact_verify",
-    # 回答
+
     "ask_llm", "self_consistency",
-    # 验证
+
     "verify_answer", "check_answer", "cross_validate",
-    # 代码 (SWE-agent SOTA)
+
     "bash", "str_replace_editor", "verify_fix",
-    # 代码 (Legacy)
+
     "list_files", "search_code", "view_file", "edit_file", "run_tests",
-    # 环境 (RAGEN)
+
     "act", "search_product", "click",
-    # 终止工具 (v7)
+
     "answer",
-    # Legacy aliases (kept for backward compat with old trajectories)
+
     "skill_invoke", "passage_search", "direct_act", "reflect", "think",
-    "parse_error",  # v7: 新增 parse_error 状态 (纯文本无工具调用)
+    "parse_error",  
 }
 
-# Tool call ID counter (simple incrementing for message protocol)
+
 _tool_call_counter = 0
 
 
 def _next_tool_call_id() -> str:
-    """Generate a unique tool call ID for the message protocol."""
+
     global _tool_call_counter
     _tool_call_counter += 1
     return f"call_{_tool_call_counter}"
 
 
 def _coerce_int(value, default: int = 0) -> int:
-    """Best-effort integer parsing for model tool arguments.
 
-    Tool-call schemas ask for integers, but local models occasionally emit
-    strings such as "200," or "line 207".  A malformed line number should not
-    crash the whole SWE episode; use the first signed integer when present and
-    otherwise fall back to the provided default.
-    """
     if value is None:
         return default
     if isinstance(value, bool):
@@ -98,10 +73,6 @@ def _coerce_int(value, default: int = 0) -> int:
         m = re.search(r"-?\d+", text)
         return int(m.group(0)) if m else default
 
-
-# ──────────────────────────────────────────────────────
-# System prompt (short — tool definitions via API, not text)
-# ──────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (
     "You are a task-solving agent that uses tools to solve problems.\n\n"
@@ -136,31 +107,21 @@ _SYSTEM_PROMPT = (
 )
 
 
-# ──────────────────────────────────────────────────────
-# 环境主类
-# ──────────────────────────────────────────────────────
-
-
 class GenericTaskEnvironment:
-    """
-    通用任务环境，管理单个 episode 的完整交互。
 
-    不绑定任何特定任务类型；任务信息通过 question dict 传入。
-    Uses multi-turn message list instead of prompt string concatenation.
-    """
 
     def __init__(
         self,
         m_exec: MExec,
         max_episode_steps: int = 8,
         epsilon_min: float = EPSILON_MIN,
-        skill_workspace=None,    # SkillWorkspace（可选，None 时不注入 skills）
-        experience_store=None,   # ExperienceStore（可选，XSkill 风格 action-level 知识）
-        context_manager=None,    # ContextWindowManager（可选）
-        max_obs_chars: int = 0,          # 0 = 不截断 observation
-        max_context_chars: int = 30000,   # 放宽 context 限制
+        skill_workspace=None,    
+        experience_store=None,   
+        context_manager=None,    
+        max_obs_chars: int = 0,          
+        max_context_chars: int = 30000,   
         reward_mode: str = "outcome_only",
-        skill_mode: str = "policy_action",  # "policy_action" aligns paper; "prompt_injection" keeps legacy tips
+        skill_mode: str = "policy_action",  
     ):
         self.m_exec = m_exec
         self.max_episode_steps = max_episode_steps
@@ -173,20 +134,20 @@ class GenericTaskEnvironment:
         self.reward_mode = reward_mode
         self.skill_mode = skill_mode
 
-        # v5: Tool call deduplication — detect and redirect repeated identical calls
-        self._recent_tool_calls: Dict[str, str] = {}  # hash(tool+args) -> observation
 
-        # v3: Code workspace for SWE-agent tools (search_code/view_file/edit_file/run_tests)
+        self._recent_tool_calls: Dict[str, str] = {}  
+
+
         self._code_workspace: Dict[str, str] = {}
-        # v5: Full repo path for SWE-bench (real filesystem access)
-        self._repo_path: Optional[str] = None
-        self._cached_diff: Optional[str] = None  # cached before evaluate_patch resets repo
-        self._edit_history: Dict[str, str] = {}  # for str_replace_editor undo
-        self._repeat_count: Dict[str, int] = {}  # per-tool REPEATED counter
-        self._python_execute_count: int = 0  # python_execute 调用计数
-        self._consecutive_repeats: int = 0  # 连续 REPEATED 计数
 
-        # v3: RAGEN adapter for interactive environments (act/search_product/click)
+        self._repo_path: Optional[str] = None
+        self._cached_diff: Optional[str] = None  
+        self._edit_history: Dict[str, str] = {}  
+        self._repeat_count: Dict[str, int] = {}  
+        self._python_execute_count: int = 0  
+        self._consecutive_repeats: int = 0  
+
+
         self._ragen_adapter = None
         try:
             from src.ragen_adapter import RAGENAdapter
@@ -200,25 +161,15 @@ class GenericTaskEnvironment:
         episode_goal: str = "",
         retrieved_experience: Optional[List[Dict]] = None,
     ) -> Tuple[List[Dict], "Trajectory"]:
-        """
-        初始化一个新 episode。
 
-        Args:
-            question:             任务 dict，含 question/answer/task_type/context 等字段
-            episode_goal:         g_q — 本 episode 的目标描述（M_mem 提供）
-            retrieved_experience: E_ret — 跨 episode 检索到的高奖励经验摘要列表
-
-        Returns:
-            (initial_messages, empty Trajectory)
-        """
         self._question = question
         self._gold = str(question.get("answer", ""))
         self._task_type = str(question.get("task_type", "factual_qa"))
         self._extra = question.get("extra", {})
-        # SWE-bench: 让 reward 函数能访问 code_files（用于 patch 验证）
+
         if question.get("code_files") and "code_files" not in self._extra:
             self._extra["code_files"] = question["code_files"]
-        # Parse context: may be a list, a JSON string, or empty
+
         raw_ctx = question.get("context", [])
         if isinstance(raw_ctx, str):
             try:
@@ -228,13 +179,13 @@ class GenericTaskEnvironment:
                 raw_ctx = [raw_ctx] if raw_ctx.strip() else []
         self._context = raw_ctx if isinstance(raw_ctx, list) else []
         self._history: List[Dict] = []
-        # IRCoT cumulate_titles 模式：跨 step 累积已检索的段落索引
+
         self._retrieved_passage_ids: set = set()
         self._step = 0
         self._episode_goal = episode_goal
         self._retrieved_experience = retrieved_experience or []
 
-        # v5: Full repo access for SWE-bench (checkout real repo at base_commit)
+
         self._code_workspace = {}
         self._code_workspace_original = {}
         self._repo_path = None
@@ -242,13 +193,13 @@ class GenericTaskEnvironment:
         if self._task_type == "code_generation" and self._extra.get("instance_id"):
             self._repo_path = self._setup_swe_repo()
         if not self._repo_path:
-            # Fallback: in-memory workspace from pre-extracted files
+
             code_files = question.get("code_files", {})
             if isinstance(code_files, dict):
                 self._code_workspace = dict(code_files)
                 self._code_workspace_original = dict(code_files)
 
-        # v3: Initialize RAGEN env for interactive tasks
+
         self._ragen_initial_obs = ""
         self._env_done = False
         self._env_reward = 0.0
@@ -264,18 +215,15 @@ class GenericTaskEnvironment:
             except Exception as e:
                 logger.warning(f"[RAGEN] Failed to reset env: {e}")
 
-        # ── 构建初始 messages ──
+
         self._messages: List[Dict] = []
 
-        # System message: per-task-type prompt (fallback to generic)
+
         from training.task_prompts import TASK_CONFIGS
         _task_cfg = TASK_CONFIGS.get(self._task_type, {})
         _sys_prompt = _task_cfg.get("system_prompt", _SYSTEM_PROMPT)
 
-        # ── Skill library exposure ─────────────────────────────────────────
-        # paper-aligned mode: expose IDs only; the supervisor must choose the
-        # skill_invoke action to receive the strategy text.
-        # legacy mode: auto-inject retrieved tip into system prompt.
+
         if self.skill_mode == "policy_action":
             self._injected_skill_ids = []
             _skill_addendum = self._skill_catalog_for_policy_action(question)
@@ -286,23 +234,22 @@ class GenericTaskEnvironment:
 
         self._messages.append({"role": "system", "content": _sys_prompt})
 
-        # User message: task + context + goal + experience（技能 tip 不再放这里）
+
         user_content = self._build_user_message(question)
         self._messages.append({"role": "user", "content": user_content})
 
-        # ── 按任务类型过滤工具 ──
-        # 减少无关工具，让模型聚焦于当前任务的正确工具
+
         from training.batch_inference import SUPERVISOR_TOOLS
         self._tools = self._filter_tools_for_task(self._task_type, SUPERVISOR_TOOLS)
 
-        # 初始化 trajectory
+
         traj = Trajectory(
             question=str(question.get("question", "")),
             gold_answer=self._gold,
             task_type=self._task_type,
         )
 
-        # 论文 Eq.12: 记录 skill 注入为 Turn 0（用于 F̂(s) 计算）
+
         for sid in getattr(self, '_injected_skill_ids', []):
             traj.add_turn(Turn(
                 supervisor_input="",
@@ -316,25 +263,20 @@ class GenericTaskEnvironment:
         return self._messages, traj
 
     def _filter_tools_for_task(self, task_type: str, all_tools: list) -> list:
-        """按任务类型过滤工具列表 — 配置来自 task_prompts.py。
-        policy_action 模式下把 skill_invoke 加回可选工具，使 skill 成为 supervisor action。"""
+
         from training.task_prompts import TASK_CONFIGS
         cfg = TASK_CONFIGS.get(task_type, {})
         allowed = set(cfg.get("tools", []))
         if self.skill_mode == "policy_action" and self.workspace and self.workspace.size > 0:
             allowed.add("skill_invoke")
         if not allowed:
-            # react 模式或未知 task_type: 返回全部工具
+
             return all_tools
         return [t for t in all_tools if t["function"]["name"] in allowed]
 
     @staticmethod
     def _canonical_tool_call_text(tool_name: str, tool_args: Optional[Dict]) -> str:
-        """
-        Canonical textual target for native tool calls with empty assistant content.
-        This keeps TTB logprob scoring well-defined without changing the actual
-        chat message, which still carries the native tool_call object.
-        """
+
         return "<tool_call>\n" + json.dumps(
             {"name": tool_name, "arguments": tool_args or {}},
             ensure_ascii=False,
@@ -348,31 +290,19 @@ class GenericTaskEnvironment:
         tool_args: Optional[Dict],
         traj: Trajectory,
     ) -> Tuple[float, bool, Dict[str, Any]]:
-        """
-        执行一步。
 
-        Args:
-            content:    Supervisor 的原始输出内容
-            tool_name:  工具名（None = 直接答案，episode 结束）
-            tool_args:  工具参数（None = 直接答案）
-            traj:       当前轨迹（原地更新）
-
-        Returns:
-            (reward, done, info)
-        """
         self._step += 1
 
-        # v6: Snapshot messages BEFORE this step (for logprob context computation)
+
         import copy
         _messages_snapshot = copy.deepcopy(self._messages)
-        # Backward-compat text representation of current messages
+
         _supervisor_input_text = "\n".join(
             f"[{m['role']}] {str(m.get('content', ''))}"
             for m in self._messages[-6:]
         )
 
-        # v7 根本重构: answer 是正规工具, 通过 tool_name=="answer" 的 tool call 终止 episode
-        # tool_name is None (纯文本无工具调用) 不再被视为答案, 改为 parse_error 继续
+
         if tool_name is None:
             allowed_tool_names = {
                 t.get("function", {}).get("name")
@@ -380,12 +310,8 @@ class GenericTaskEnvironment:
                 if t.get("function", {}).get("name")
             }
             if self._task_type == "code_generation" and "answer" not in allowed_tool_names:
-                # For SWE evaluation the submitted artifact is the workspace
-                # diff, not a prose answer.  Once a source edit exists, a
-                # no-tool assistant turn usually means "I'm done"; treating it
-                # as another parse error causes long post-edit loops and
-                # sometimes extra damaging edits.  This is a generic submit
-                # condition based only on the current workspace diff.
+
+
                 workspace_diff = self._generate_workspace_diff()
                 if workspace_diff.strip():
                     logger.info(
@@ -405,7 +331,7 @@ class GenericTaskEnvironment:
                     "[PARSE_ERROR] No tool call detected. You must call a tool. "
                     "To submit your final answer, use the 'answer' tool with response=<your answer>."
                 )
-            # 模型输出纯文本但没调用任何工具 → parse_error, 继续 episode
+
             parse_err_turn = Turn(
                 supervisor_input=_supervisor_input_text,
                 supervisor_output=content if content else "",
@@ -417,7 +343,7 @@ class GenericTaskEnvironment:
                 instruction="",
             )
             traj.add_turn(parse_err_turn)
-            # 把反馈加入 messages, 让下轮模型看到
+
             self._messages.append({"role": "assistant", "content": content if content else ""})
             self._messages.append({
                 "role": "user",
@@ -429,7 +355,7 @@ class GenericTaskEnvironment:
 
         _supervisor_output_text = content or self._canonical_tool_call_text(tool_name, tool_args or {})
 
-        # v7: answer 工具调用 → 终止 episode, 提取 response 作为最终答案
+
         if tool_name == "answer":
             allowed_tool_names = {
                 t.get("function", {}).get("name")
@@ -459,14 +385,13 @@ class GenericTaskEnvironment:
                     return self._force_terminate(traj)
                 return 0.0, False, {"observation": reject_obs, "parse_error": True}
 
-            # 硬约束: 必须先用过至少 1 个真实工具, 才能调用 answer
-            # (SGLang tool_call_parser 不强制 tools list, 此处是权威强制点)
+
             real_tool_turns = [
                 t for t in traj.turns
                 if getattr(t, 'action_type', '') not in ('answer', 'skill_invoke', '', 'parse_error')
             ]
             if not real_tool_turns:
-                # Reject: 把 answer 当作 parse_error 处理, 反馈模型必须先用工具
+
                 reject_obs = (
                     "[INVALID] The 'answer' tool is not available yet. "
                     "You MUST call another tool (e.g., search, python_execute, view_file) "
@@ -483,7 +408,7 @@ class GenericTaskEnvironment:
                     instruction="",
                 )
                 traj.add_turn(parse_err_turn)
-                # Append feedback to messages so model sees it next turn
+
                 self._messages.append({"role": "assistant", "content": content if content else ""})
                 self._messages.append({"role": "user", "content": reject_obs})
                 if self._step >= self.max_episode_steps:
@@ -494,9 +419,7 @@ class GenericTaskEnvironment:
             if tool_args:
                 answer = str(tool_args.get("response", "") or "").strip()
 
-            # SWE/code_generation episodes are scored from the actual source
-            # diff, not from prose. If a parsed hidden `answer` call appears
-            # before any edit, reject it and force the model back to editing.
+
             workspace_diff = ""
             if self._task_type == "code_generation":
                 workspace_diff = self._generate_workspace_diff()
@@ -524,7 +447,7 @@ class GenericTaskEnvironment:
                         return self._force_terminate(traj)
                     return 0.0, False, {"observation": reject_obs, "parse_error": True}
 
-            # Build Turn — 保留原始 content/tool_call 格式以便梯度计算
+
             turn = Turn(
                 supervisor_input=_supervisor_input_text,
                 supervisor_output=_supervisor_output_text,
@@ -534,15 +457,14 @@ class GenericTaskEnvironment:
                 messages_snapshot=_messages_snapshot,
             )
 
-            # interactive_agent: 优先用环境的 done/reward 信号
-            # code_generation: reward 基于实际代码变更（diff），不是模型的文本答案
+
             eval_pred = answer
             if self._task_type == "code_generation":
                 if workspace_diff:
                     eval_pred = workspace_diff
 
             if self._task_type in ("webshop", "alfworld", "interactive_agent") and self._env_done and self._env_reward > 0:
-                # 使用环境返回的实际 reward（WebShop: graded 0-1, ALFWorld: binary 0/1）
+
                 r_answer = min(float(self._env_reward), 1.0)
                 if str(self.reward_mode).lower() in {"outcome_only", "paper", "outcome"}:
                     r_process = 0.0
@@ -585,14 +507,10 @@ class GenericTaskEnvironment:
                 "r_skill": r_skill,
             }
 
-        # ── TOOL CALL: dispatch and get observation ──
+
         args = tool_args or {}
 
-        # Some local tool-call parsers emit natural terminal tool names such as
-        # `submit` even though code_generation intentionally exposes no answer
-        # tool.  This is not a new tool; it is a generic submit intent.  If a
-        # source diff already exists, submit that diff instead of converting the
-        # unknown tool into an `analyze` parse error and wasting steps.
+
         if self._task_type == "code_generation":
             terminal_names = {"submit", "finish", "final", "done", "accept"}
             if str(tool_name or "").strip().lower() in terminal_names:
@@ -605,9 +523,9 @@ class GenericTaskEnvironment:
                     )
                     return self._force_terminate(traj)
 
-        # Validate tool name
+
         if tool_name not in _VALID_ACTION_TYPES:
-            # Auto-map dyn_XXX skill IDs to skill_invoke
+
             if re.match(r"^dyn_\d+$", tool_name) or re.match(r"^[a-z_]+_\d{3}$", tool_name):
                 args["skill_id"] = tool_name
                 tool_name = "skill_invoke"
@@ -616,12 +534,7 @@ class GenericTaskEnvironment:
                 tool_name = "analyze"
                 args = {"instruction": content[:500]}
 
-        # Enforce the per-task filtered tool list. Some local tool-call
-        # parsers may still emit a learned tool name that was not included in
-        # the API tools schema. Executing a hidden tool would make tool
-        # ablations/quality experiments invalid, so return a normal
-        # observation asking the model to use one of the actually available
-        # tools instead.
+
         allowed_tool_names = {
             t.get("function", {}).get("name")
             for t in getattr(self, "_tools", []) or []
@@ -663,8 +576,7 @@ class GenericTaskEnvironment:
                 return self._force_terminate(traj)
             return 0.0, False, {"observation": reject_obs, "parse_error": True}
 
-        # Build Turn
-        # Extract primary instruction text for Turn tracking
+
         instruction = (
             args.get("instruction") or args.get("query") or args.get("claim")
             or args.get("thought") or args.get("goal") or args.get("problem")
@@ -689,21 +601,16 @@ class GenericTaskEnvironment:
             },
         )
 
-        # v5: Dedup — if exact same tool+args already called, return cached
-        # observation plus a neutral state note.  This should not force the
-        # supervisor's next action; it only makes clear that the repeated call
-        # adds no new evidence.
+
         import hashlib
         _call_key = hashlib.md5(f"{tool_name}:{json.dumps(args, sort_keys=True)}".encode()).hexdigest()
         if _call_key in self._recent_tool_calls and tool_name not in ("edit_file", "run_tests", "str_replace_editor", "verify_fix"):
             prev = self._recent_tool_calls[_call_key]
-            # Count exact repeated calls by tool+args.  A previous
-            # implementation counted per tool name, so a later different
-            # search could inherit "REPEATED x17" from an unrelated query,
-            # making the returned state inaccurate.
+
+
             repeat_i = self._repeat_count.get(_call_key, 0) + 1
             self._repeat_count[_call_key] = repeat_i
-            self._repeat_count[tool_name] = repeat_i  # legacy/diagnostic compat
+            self._repeat_count[tool_name] = repeat_i  
             self._consecutive_repeats += 1
             _dedup_hints = {
                 "bash": "The cached command result is below; this exact call adds no new evidence.",
@@ -715,10 +622,8 @@ class GenericTaskEnvironment:
             hint = _dedup_hints.get(tool_name, "This exact repeated call will not add new information.")
             evidence_note = ""
             if tool_name == "search_code":
-                # Parse a grep-like hit from the previous observation and turn
-                # it into a compact evidence note. It only reformats the
-                # model's own previous search
-                # result so repeated identical searches stop wasting steps.
+
+
                 if "[NO_MATCH]" in str(prev):
                     evidence_note = (
                         "\nCached search status: NO_MATCH. Any relaxed locations in the cached "
@@ -727,11 +632,8 @@ class GenericTaskEnvironment:
                 else:
                     cached_hits: List[Tuple[str, int]] = []
                     seen_cached_hits = set()
-                    # GNU grep with -C emits both match lines (path:line:)
-                    # and context lines (path-line-).  Keep the first few
-                    # distinct source locations from the same cached result so
-                    # repeated searches can expose different already-returned
-                    # evidence instead of reinforcing the first generic hit.
+
+
                     for loc in re.finditer(
                         r"(?m)(?:^|\n)(?:\./)?([^:\n]+\.py)[:\-](\d+)(?=[:\-])",
                         str(prev),
@@ -769,12 +671,8 @@ class GenericTaskEnvironment:
                         if repeat_i <= 1:
                             context_hits = [cached_hits[0]]
                         elif repeat_i <= 3:
-                            # On later exact repeats, rotate through the
-                            # already-cached hit locations.  This does not
-                            # perform a new search and does not prescribe a
-                            # next action; it simply makes the cached evidence
-                            # less myopic when the first hit is a generic
-                            # declaration.
+
+
                             start_i = min(max(repeat_i - 1, 0), len(cached_hits) - 1)
                             context_hits = cached_hits[start_i:start_i + 2]
                         if context_hits:
@@ -799,10 +697,8 @@ class GenericTaskEnvironment:
             if repeat_i <= 1:
                 prev_block = f"\nCached result excerpt:\n{prev[:700]}"
             else:
-                # After multiple exact repeats, replaying the same long result
-                # tends to reinforce loops.  Keep only a compact status and do
-                # not replay relaxed hit snippets again; the full evidence
-                # remains in earlier tool messages and in SWE_MEMORY.
+
+
                 prev_clean = self._strip_swe_memory(prev)
                 if "[NO_MATCH]" in prev_clean:
                     compact_prev = "previous cached observation was NO_MATCH"
@@ -881,9 +777,8 @@ class GenericTaskEnvironment:
                                 + " are not named in this repeated query."
                             )
         else:
-            # Dispatch tool and get observation.  Do not hide or override tool
-            # output based on step count; budget management belongs in the
-            # prompt/skill, not in forced environment intervention.
+
+
             observation = self._dispatch_tool(tool_name, args, traj)
             self._recent_tool_calls[_call_key] = observation
             if tool_name == "edit_file" and (
@@ -891,20 +786,17 @@ class GenericTaskEnvironment:
                 or "[WARN]" in str(observation)
                 or "[NO_CHANGE_NET]" in str(observation)
             ):
-                # The repository changed. Cached view/search observations may
-                # now be stale; invalidate them so post-edit inspection sees
-                # the actual updated source instead of a pre-edit snapshot.
+
+
                 self._recent_tool_calls.clear()
             self._repeat_count[_call_key] = 0
             self._repeat_count[tool_name] = 0
-            self._consecutive_repeats = 0  # 新工具调用成功 → 重置连续 repeat
+            self._consecutive_repeats = 0  
 
         if self.max_obs_chars > 0:
             observation = observation[:self.max_obs_chars]
 
-        # SWE memory feedback: append a compact, model-visible memory of the
-        # previous source-tool observations.  This is intentionally historical
-        # state only: no "next action" prescription or evaluation labels.
+
         if self._task_type == "code_generation":
             memory = self._swe_memory_summary(
                 traj=traj,
@@ -918,7 +810,7 @@ class GenericTaskEnvironment:
             observation = self._cap_swe_observation(observation)
         turn.observation = observation
 
-        # Record in history (for lookup tool and _handle_ask_llm)
+
         self._history.append({
             "step": self._step,
             "action_type": tool_name,
@@ -929,8 +821,7 @@ class GenericTaskEnvironment:
 
         traj.add_turn(turn)
 
-        # ── Append to multi-turn messages ──
-        # Assistant message with tool_call + reasoning content
+
         tc_id = _next_tool_call_id()
         self._messages.append({
             "role": "assistant",
@@ -944,42 +835,27 @@ class GenericTaskEnvironment:
                 },
             }],
         })
-        # Tool result message
+
         self._messages.append({
             "role": "tool",
             "tool_call_id": tc_id,
             "content": observation,
         })
 
-        # 不截断上下文 — SGLang context_length=32768 足够容纳完整历史
-        # 模型需要看到所有之前的交互才能做出正确决策
 
-        # verify_fix PASS → 提前结束 episode（SWE-bench 主动提交机制）
         if tool_name == "verify_fix" and "[PASS]" in observation:
             logger.info(f"[Env] verify_fix PASS → early termination at step {self._step}")
             return self._force_terminate(traj)
 
-        # Check max steps
+
         if self._step >= self.max_episode_steps:
             return self._force_terminate(traj)
 
         return 0.0, False, {"observation": observation}
 
-    # ──────────────────────────────────────────────
-    # User message construction
-    # ──────────────────────────────────────────────
 
     def _inject_skill_tip_to_system(self, question: Dict[str, Any]) -> str:
-        """
-        检索并返回应附加到 system prompt 的 skill tip 文本。
 
-        优化点（相对于把 tip 放在 user message 末尾）：
-        - Prefix cache 命中率大幅提升（同一 task_type 的 tip 固定）
-        - 注意力机制下 system 权重高，tip 的执行率更好
-        - user message 保持简洁、针对 query
-
-        副作用：填充 self._injected_skill_ids 供 TTB F̂(s) 计算使用
-        """
         self._injected_skill_ids = []
         _ws = self.workspace
         _ws_size = _ws.size if _ws else 0
@@ -999,7 +875,7 @@ class GenericTaskEnvironment:
                             f"[Skill] Injected tip for {task_type}: "
                             f"[{tip.meta.skill_id}] \"{tip_text[:60]}\" ({len(tip_text.split())}w)"
                         )
-                        # 格式化为 system prompt 的扩展段落
+
                         return (
                             "\n\n# Learned Strategy (follow this priority)\n"
                             f"{tip_text.strip()}\n"
@@ -1018,11 +894,7 @@ class GenericTaskEnvironment:
         return ""
 
     def _skill_catalog_for_policy_action(self, question: Dict[str, Any]) -> str:
-        """
-        Paper-aligned skill exposure: show a compact catalog of candidate skill IDs
-        but do not reveal the strategy.  The supervisor must explicitly call
-        skill_invoke(skill_id=...) to obtain and use the skill content.
-        """
+
         self._injected_skill_ids = []
         _ws = self.workspace
         if not _ws or _ws.size <= 0:
@@ -1058,12 +930,7 @@ class GenericTaskEnvironment:
         )
 
     def _react_skill_catalog_for_policy_action(self, task_description: str) -> str:
-        """
-        ReAct variant of the paper-aligned skill catalog.
-        The model can choose `skill_invoke[skill_id]` as a ReAct action; the
-        environment intercepts it and returns the selected strategy as the next
-        observation without stepping the external environment.
-        """
+
         _ws = self.workspace
         if not _ws or _ws.size <= 0:
             return ""
@@ -1092,21 +959,17 @@ class GenericTaskEnvironment:
         )
 
     def _build_user_message(self, question: Dict[str, Any]) -> str:
-        """
-        构建 user message 内容。
 
-        论文 §3.3：H_0 = q ⊕ S_ret ⊕ g_q ⊕ E_ret
-        """
         q_text = str(question.get("question", ""))
         task_type = self._task_type
 
-        # ── q（任务问题）──
+
         if task_type in ("multi_hop_qa", "factual_qa") and "\nQuestion:" in q_text:
             q_text = q_text.split("\nQuestion:")[-1].strip()
             q_text = q_text.strip("? \n") + "?"
         task_section = f"## Task\nType: {task_type}\n\nQuestion: {q_text}"
 
-        # ── Context ──
+
         context_section = ""
         if self._context and self._task_type not in ("multi_hop_qa", "factual_qa"):
             ctx_text = self._format_context()
@@ -1120,7 +983,7 @@ class GenericTaskEnvironment:
                 f"You must search for evidence before answering."
             )
 
-        # ── Environment observation + few-shot (interactive_agent) ──
+
         if self._ragen_initial_obs and "ENV_UNAVAILABLE" not in self._ragen_initial_obs:
             env_type = question.get("env_type", "")
             if env_type == "alfworld":
@@ -1153,7 +1016,7 @@ class GenericTaskEnvironment:
             else:
                 context_section += f"\n\n## Environment Observation\n{self._ragen_initial_obs}"
 
-        # ── SWE-bench guidance ──
+
         if self._task_type == "code_generation" and self._repo_path:
             context_section += (
                 f"\n\n## Repository\n"
@@ -1172,28 +1035,22 @@ class GenericTaskEnvironment:
                 f"Files available:\n" + "\n".join(files_info) + "\n"
             )
 
-        # 注意：skill tip 已在 reset() 中注入到 system message (见 _inject_skill_tip_to_system)
-        # 此处不再添加到 user_content，保持 user message 简洁、针对具体 query
 
         user_content = (
             task_section
             + context_section
         )
 
-        # Safety limit
+
         if self.max_context_chars > 0 and len(user_content) > self.max_context_chars:
             user_content = user_content[:self.max_context_chars] + "\n[CONTEXT TRUNCATED]"
 
         return user_content
 
-    # ──────────────────────────────────────────────
-    # v4: Unified tool dispatch (20 tools, no think/accept)
-    # ──────────────────────────────────────────────
 
     def _dispatch_tool(self, tool_name: str, args: Dict, traj: "Trajectory") -> str:
-        """Route tool_name to the appropriate handler."""
 
-        # ── 推理工具 ──
+
         if tool_name == "think":
             return self._handle_think(args)
         if tool_name == "plan":
@@ -1201,7 +1058,7 @@ class GenericTaskEnvironment:
         if tool_name == "decompose":
             return self._handle_decompose(args, traj)
 
-        # ── 计算工具 ──
+
         if tool_name == "python_execute":
             return self._handle_python_execute(args, traj)
         if tool_name == "test_code":
@@ -1209,7 +1066,7 @@ class GenericTaskEnvironment:
         if tool_name == "analyze":
             return self._handle_analyze(args)
 
-        # ── 检索工具 ──
+
         if tool_name in ("search", "passage_search"):
             return self._handle_search(args)
         if tool_name == "lookup":
@@ -1217,13 +1074,13 @@ class GenericTaskEnvironment:
         if tool_name == "fact_verify":
             return self._verify_fact(args.get("claim", ""))
 
-        # ── 回答工具 ──
+
         if tool_name == "ask_llm":
             return self._handle_ask_llm(args)
         if tool_name == "self_consistency":
             return self._handle_self_consistency(args)
 
-        # ── 验证工具 ──
+
         if tool_name == "verify_answer":
             return self._handle_verify_answer(args)
         if tool_name == "check_answer":
@@ -1231,17 +1088,17 @@ class GenericTaskEnvironment:
         if tool_name == "cross_validate":
             return self._handle_cross_validate(args)
 
-        # ── 验证工具 ──
+
         if tool_name == "verify_fix":
             return self._handle_verify_fix(args)
 
-        # ── SOTA SWE-agent 工具 ──
+
         if tool_name == "bash":
             return self._handle_bash(args)
         if tool_name == "str_replace_editor":
             return self._handle_str_replace_editor(args)
 
-        # ── Legacy 代码工具 (fallback) ──
+
         if tool_name == "list_files":
             return self._handle_list_files()
         if tool_name == "search_code":
@@ -1253,7 +1110,7 @@ class GenericTaskEnvironment:
         if tool_name == "run_tests":
             return self._handle_run_tests(args)
 
-        # ── 环境工具 (RAGEN) ──
+
         if tool_name == "act":
             return self._handle_act(args)
         if tool_name == "search_product":
@@ -1261,7 +1118,7 @@ class GenericTaskEnvironment:
         if tool_name == "click":
             return self._handle_click(args)
 
-        # ── Legacy aliases ──
+
         if tool_name == "skill_invoke":
             return self._handle_skill_invoke(args)
         if tool_name == "reflect":
@@ -1271,15 +1128,14 @@ class GenericTaskEnvironment:
 
         return f"[ERROR] Unknown tool: {tool_name}"
 
-    # ── 推理工具 handlers ──
 
     def _handle_think(self, args: Dict) -> str:
-        """think: Supervisor 自身推理，不调 M_exec"""
+
         thought = args.get("thought", args.get("instruction", ""))
         return f"[Thought] {thought}"
 
     def _handle_plan(self, args: Dict) -> str:
-        """plan: M_exec 生成详细计划"""
+
         goal = args.get("goal", "").strip()
         if not goal:
             return "[plan] [ERROR] No goal provided. Pass a concrete objective as 'goal' arg."
@@ -1291,7 +1147,7 @@ class GenericTaskEnvironment:
         return f"[Plan]\n{plan_result}"
 
     def _handle_decompose(self, args: Dict, traj: "Trajectory") -> str:
-        """decompose: 问题分解"""
+
         problem = args.get("problem", args.get("instruction", "")).strip()
         if not problem:
             return "[decompose] [ERROR] No problem provided. Pass the problem text as 'problem' arg."
@@ -1328,20 +1184,16 @@ class GenericTaskEnvironment:
             task_type=self._task_type,
         )
 
-    # ── 计算工具 handlers ──
 
     _python_execute_count: int = 0
 
     def _handle_python_execute(self, args: Dict, traj: "Trajectory") -> str:
-        """python_execute: 执行 Python 代码。code_generation 直接执行 instruction 中的代码。
 
-        v5.3: instruction hash dedup - 防相同 instruction 重复调用 M_exec (131s+ slow step)
-        """
         instruction = args.get("instruction", "")
 
-        # v5.3: 相同 instruction 直接返回缓存 (避免 131s M_exec re-generation)
+
         import hashlib
-        instr_normalized = " ".join(instruction.split())  # normalize whitespace
+        instr_normalized = " ".join(instruction.split())  
         instr_hash = hashlib.md5(instr_normalized.encode()).hexdigest()[:16]
         cache_key = f"python_execute::{instr_hash}"
         if hasattr(self, '_recent_tool_calls') and cache_key in self._recent_tool_calls:
@@ -1352,7 +1204,7 @@ class GenericTaskEnvironment:
                 f"Hint: vary instruction substantively or proceed to answer."
             )
 
-        # code_generation: 限制连续 python_execute（防止无限分析不编辑）
+
         if self._task_type == "code_generation":
             self._python_execute_count += 1
             if self._python_execute_count > 1:
@@ -1361,9 +1213,7 @@ class GenericTaskEnvironment:
                     "No source edit has been recorded yet; the current repository diff is empty."
                 )
 
-        # Separation 原则: Supervisor 只描述要算什么 (NL), M_exec 生成代码并执行.
-        # 拒绝 instruction 含代码的请求 — 强制 Supervisor 学会 NL 描述, 不受
-        # max_tokens=512 的代码截断 bug 影响.
+
         _first_lines = instruction.strip().split('\n')[:5]
         _code_starters = ("import ", "from ", "def ", "class ", "print(", "#!", "try:", "with ")
         instruction_is_code = any(
@@ -1378,7 +1228,7 @@ class GenericTaskEnvironment:
                 "不要传 Python 源代码."
             )
 
-        # NL 路径: M_exec 生成代码再执行 (唯一路径)
+
         exec_prompt = self._build_code_gen_prompt("python_execute", instruction, traj)
         tip_ctx = self._get_injected_tip()
         raw_code = self.m_exec.execute(
@@ -1425,16 +1275,13 @@ class GenericTaskEnvironment:
             )
         if unreliable_warning:
             result_msg = unreliable_warning + result_msg
-        # v5.3: cache for dedup
+
         if hasattr(self, '_recent_tool_calls'):
             self._recent_tool_calls[cache_key] = result_msg
         return result_msg
 
     def _m_exec_generate_verify_script(self, description: str) -> str:
-        """M_exec 根据 NL description 生成验证脚本 (Python)。
 
-        Orchestration/Execution 分离：Supervisor 描述验证目标，M_exec 写脚本。
-        """
         prompt = (
             "Write a Python script that verifies whether a specific bug fix works. "
             "The script exits with 0 on PASS (fix works) and 1 on FAIL (bug still present).\n\n"
@@ -1454,16 +1301,10 @@ class GenericTaskEnvironment:
         return code.strip()
 
     def _handle_verify_fix(self, args: Dict) -> str:
-        """verify_fix: Supervisor 描述要验证什么 (description), M_exec 写脚本并运行.
 
-        分离原则: Supervisor (π_θ) 决定验证时机 + 验证目标 (NL),
-        M_exec (冻结 base) 生成精确的 Python 测试脚本.
-
-        脚本契约: exit(1)=bug存在, exit(0)=已修复。
-        """
         description = args.get("description", "").strip()
         if not description:
-            # Backward-compat: if Supervisor still sends `script`, give a clear migration error
+
             if args.get("script", "").strip():
                 return (
                     "[verify_fix] [ERROR] This tool now takes `description` (natural language). "
@@ -1479,9 +1320,9 @@ class GenericTaskEnvironment:
         if not script:
             return f"[verify_fix] [ERROR] M_exec returned empty script for: {description[:200]}"
 
-        # v5.3: hash dedup - 相同或近似 script 已跑过就直接返回缓存结果
+
         import hashlib
-        # normalize whitespace for near-dupe detection
+
         script_normalized = "\n".join(line.strip() for line in script.split("\n") if line.strip())
         script_hash = hashlib.md5(script_normalized.encode()).hexdigest()[:16]
         cache_key = f"verify_fix::{script_hash}"
@@ -1495,7 +1336,7 @@ class GenericTaskEnvironment:
 
         import subprocess, tempfile
 
-        # 默认用训练自身的 venv Python (有 sympy/numpy/scipy); code_generation 可切换到 SWE repo 的 conda env
+
         python_cmd = sys.executable
         cwd = self._repo_path or "/tmp"
         instance_id = self._extra.get("instance_id", "")
@@ -1516,10 +1357,7 @@ class GenericTaskEnvironment:
                 f.write(script)
                 tmp_path = f.name
 
-            # The verify script lives in /tmp, so Python's default sys.path
-            # would not include the repository even when cwd is the repo root.
-            # Add cwd to PYTHONPATH to avoid false ModuleNotFoundError failures
-            # such as `import django.template` inside a checked-out Django repo.
+
             py_path_parts = [cwd] if cwd else []
             if os.environ.get("PYTHONPATH"):
                 py_path_parts.append(os.environ["PYTHONPATH"])
@@ -1551,7 +1389,7 @@ class GenericTaskEnvironment:
                     f"Error: {stderr}\n"
                     f"Your fix is not correct yet. Read the error above and adjust your edit_file."
                 )
-            # Cache result for dedup
+
             if hasattr(self, '_recent_tool_calls'):
                 self._recent_tool_calls[cache_key] = result_msg
             return result_msg
@@ -1567,10 +1405,7 @@ class GenericTaskEnvironment:
                 pass
 
     def _handle_test_code(self, args: Dict, traj: "Trajectory") -> str:
-        """test_code: M_exec 写函数 + 本地测试
 
-        v5.3: try-except around code extraction/execution
-        """
         instruction = args.get("instruction", "").strip()
         if not instruction:
             return "[test_code] [ERROR] No instruction provided."
@@ -1589,7 +1424,7 @@ class GenericTaskEnvironment:
             return f"[test_code] [ERROR] Exception during test_code: {type(e).__name__}: {e}"
 
     def _handle_analyze(self, args: Dict) -> str:
-        """analyze: M_exec 分析/推理"""
+
         instruction = args.get("instruction", "")
         data = args.get("data", "")
         context = data if data else self._format_context()
@@ -1598,10 +1433,9 @@ class GenericTaskEnvironment:
         )
         return f"[Analysis] {result}"
 
-    # ── 检索工具 handlers ──
 
     def _handle_search(self, args: Dict) -> str:
-        """search (formerly passage_search): 本地 BM25+Dense 检索"""
+
         query = args.get("query", "")
         if not query.strip():
             return "[search] [ERROR] Empty query provided."
@@ -1612,13 +1446,7 @@ class GenericTaskEnvironment:
         return observation
 
     def _handle_lookup(self, args: Dict) -> str:
-        """lookup: 在已检索文档中搜索 keyword.
 
-        v5.3 改进:
-        - 同时尝试 exact match + fuzzy token match (所有 token 都在 obs)
-        - 窗口扩 400 chars (200 前 / 200 后)
-        - NO_MATCH 时返回 history 里最常见 capitalized tokens 作为 suggest
-        """
         import re
         keyword = args.get("keyword", "").strip()
         if not keyword:
@@ -1634,15 +1462,15 @@ class GenericTaskEnvironment:
             obs = s.get("observation", "") or ""
             obs_lower = obs.lower()
             if keyword_lower in obs_lower:
-                # Exact substring match
+
                 idx = obs_lower.find(keyword_lower)
                 start = max(0, idx - 200)
                 end = min(len(obs), idx + len(keyword_lower) + 200)
                 snippet = obs[start:end]
                 exact_matches.append(f"[Step {s['step']}] ...{snippet}...")
             elif len(tokens) > 1 and all(t in obs_lower for t in tokens):
-                # Fuzzy: 所有 token 都在, 但不相邻 (co-reference / reorder)
-                # Anchor 到第一个 token
+
+
                 idx = obs_lower.find(tokens[0])
                 start = max(0, idx - 150)
                 end = min(len(obs), idx + 400)
@@ -1660,12 +1488,12 @@ class GenericTaskEnvironment:
             )
             return header + "\n" + "\n".join(fuzzy_matches[:3])
 
-        # NO_MATCH: 收集 history 里的 capitalized tokens 作 suggestion
+
         from collections import Counter
         all_tokens = []
         for s in self._history:
             obs = s.get("observation", "") or ""
-            # 提取 Capitalized Words 和 数字
+
             all_tokens.extend(re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b', obs))
         top = [w for w, _ in Counter(all_tokens).most_common(10)]
         suggestion = f" Try one of: {', '.join(top[:8])}" if top else ""
@@ -1674,19 +1502,15 @@ class GenericTaskEnvironment:
             f"{suggestion} Or try fewer words / different capitalization."
         )
 
-    # ── 回答工具 handlers ──
 
     def _handle_ask_llm(self, args: Dict) -> str:
-        """ask_llm: M_exec 直接回答
 
-        v5.3: 移除 len(obs)>20 filter - 合法短答案 (如 "Yes"/"42") 不应被过滤
-        """
         question_text = args.get("question", args.get("instruction", ""))
         original_q = str(self._question.get("question", ""))
         evidence = []
         for h in self._history:
             obs = h.get("observation", "")
-            if obs:  # v5.3: 接受任何非空 obs
+            if obs:  
                 evidence.append(f"[{h['action_type']}] {obs}")
         evidence_text = "\n".join(evidence[-5:]) if evidence else "(no evidence collected yet)"
         ask_prompt = (
@@ -1700,7 +1524,7 @@ class GenericTaskEnvironment:
         return f"[LLM Answer] {result}"
 
     def _handle_self_consistency(self, args: Dict) -> str:
-        """self_consistency: M_exec x3 多数投票"""
+
         instruction = args.get("instruction", "")
         question = str(self._question.get("question", ""))[:500]
         sc_prompt = (
@@ -1714,7 +1538,7 @@ class GenericTaskEnvironment:
             lines = [l.strip() for l in raw.strip().split('\n') if l.strip()]
             answers.append(lines[-1] if lines else "")
         from collections import Counter
-        # v5.3: 防 3 次全空导致 Counter.most_common(1) IndexError
+
         non_empty = [a for a in answers if a]
         if not non_empty:
             return (
@@ -1730,10 +1554,9 @@ class GenericTaskEnvironment:
             f"All answers: {answers}"
         )
 
-    # ── 验证工具 handlers ──
 
     def _handle_verify_answer(self, args: Dict) -> str:
-        """verify_answer: 回代验证"""
+
         candidate = args.get("answer", args.get("instruction", ""))
         method = args.get("method", "substitute")
         question = str(self._question.get("question", ""))[:500]
@@ -1750,14 +1573,11 @@ class GenericTaskEnvironment:
         code = self._extract_code_block(raw)
         if code:
             return self._execute_python(code)
-        # v5.3: 截断 raw 防 context overflow
+
         return f"[verify_answer] [ERROR] Could not generate verification code. Raw response (truncated): {raw[:500]}"
 
     def _handle_check_answer(self, args: Dict) -> str:
-        """check_answer: 格式/合理性快速检查
 
-        v5.3: 加状态 prefix ([PASS]/[FAIL]/[WARN]) + 截断防 context overflow
-        """
         answer = args.get("answer", "").strip()
         if not answer:
             return "[check_answer] [ERROR] No answer provided."
@@ -1780,10 +1600,7 @@ class GenericTaskEnvironment:
         return f"[Check] {status}\n{result_truncated}"
 
     def _handle_cross_validate(self, args: Dict) -> str:
-        """cross_validate: 用不同方法求解并对比
 
-        v5.3: 加 [MATCH]/[DIFF] 指示 + 截断
-        """
         answer = args.get("answer", "").strip()
         if not answer:
             return "[cross_validate] [ERROR] No answer provided."
@@ -1806,12 +1623,11 @@ class GenericTaskEnvironment:
             indicator = "[UNCLEAR]"
         return f"[Cross-Validation] {indicator}\n{result_truncated}"
 
-    # ── SWE-bench repo setup ──
 
     _SWE_BENCH_REPOS = os.environ.get("SWE_BENCH_ENVS", "swe_bench_envs")
 
     def _setup_swe_repo(self) -> Optional[str]:
-        """用 git worktree 创建独立工作目录（支持并行）。Returns worktree_path or None."""
+
         import subprocess, tempfile
         try:
             from training.swe_bench_eval import (
@@ -1828,14 +1644,14 @@ class GenericTaskEnvironment:
             if not repo_path or not repo_path.exists():
                 return None
 
-            # 创建独立 worktree（并行安全）
+
             worktree_dir = tempfile.mkdtemp(prefix=f"swe_{instance_id.replace('/', '_')[:30]}_")
             result = subprocess.run(
                 ["git", "worktree", "add", worktree_dir, base_commit, "--detach", "-q"],
                 cwd=str(repo_path), capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                # Fallback: 直接在 repo 上 checkout（非并行安全）
+
                 repo_str = str(repo_path)
                 subprocess.run(["git", "checkout", base_commit, "-q"], cwd=repo_str, capture_output=True, timeout=30)
                 subprocess.run(["git", "checkout", ".", "-q"], cwd=repo_str, capture_output=True, timeout=10)
@@ -1843,7 +1659,7 @@ class GenericTaskEnvironment:
                 logger.info(f"[SWE] Fallback checkout {repo} @ {base_commit[:10]} at {repo_str}")
                 return repo_str
 
-            self._worktree_dir = worktree_dir  # 保存用于清理
+            self._worktree_dir = worktree_dir  
             self._worktree_repo = str(repo_path)
             logger.info(f"[SWE] Worktree {repo} @ {base_commit[:10]} at {worktree_dir}")
             return worktree_dir
@@ -1852,7 +1668,7 @@ class GenericTaskEnvironment:
             return None
 
     def cleanup(self):
-        """清理 worktree（episode 结束后调用）。"""
+
         import subprocess, shutil
         wt = getattr(self, '_worktree_dir', None)
         repo = getattr(self, '_worktree_repo', None)
@@ -1867,24 +1683,23 @@ class GenericTaskEnvironment:
             except Exception:
                 pass
 
-    # ── SOTA: bash + str_replace_editor (SWE-agent default) ──
 
     _MAX_BASH_OUTPUT = 10000
     _MAX_RESPONSE_LEN = 16000
 
     def _handle_bash(self, args: Dict) -> str:
-        """bash: 在仓库目录执行 shell 命令（SWE-agent / mini-SWE-agent 核心工具）。"""
+
         import subprocess
         command = args.get("command", "")
         if not command.strip():
             return "No command provided."
         cwd = self._repo_path or "/tmp"
-        # 安全：禁止破坏性命令
+
         dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/"]
         if any(d in command for d in dangerous):
             return "Command rejected for safety."
         try:
-            # 使用项目 conda env（如果有的话）
+
             env_prefix = ""
             instance_id = self._extra.get("instance_id", "")
             if instance_id and self._repo_path:
@@ -1929,7 +1744,7 @@ class GenericTaskEnvironment:
             return f"Error: {e}"
 
     def _handle_str_replace_editor(self, args: Dict) -> str:
-        """str_replace_editor: SWE-agent 的统一编辑器（view/create/str_replace/insert/undo_edit）。"""
+
         command = args.get("command", "")
         path = args.get("path", "")
         logger.info(f"[SRE] command={command}, path={path[:80]}")
@@ -1937,7 +1752,7 @@ class GenericTaskEnvironment:
         if not path:
             return "Error: path is required."
 
-        # 如果用真实仓库，使用绝对路径
+
         if self._repo_path and not os.path.isabs(path):
             full_path = os.path.join(self._repo_path, path.lstrip("./"))
         else:
@@ -1957,7 +1772,7 @@ class GenericTaskEnvironment:
             return f"Error: unknown command '{command}'. Use: view, create, str_replace, insert, undo_edit."
 
     def _sre_view(self, full_path: str, display_path: str, view_range) -> str:
-        """str_replace_editor view — 查看文件或目录。"""
+
         if os.path.isdir(full_path):
             import subprocess
             result = subprocess.run(
@@ -1988,7 +1803,7 @@ class GenericTaskEnvironment:
                 if end < start:
                     end = min(total, start)
 
-        # 截断长输出
+
         if end - start + 1 > 300:
             end = start + 299
 
@@ -2001,7 +1816,7 @@ class GenericTaskEnvironment:
         return result
 
     def _sre_create(self, full_path: str, display_path: str, file_text: str) -> str:
-        """str_replace_editor create。"""
+
         if os.path.exists(full_path):
             return f"Error: {display_path} already exists. Use str_replace to edit it."
         try:
@@ -2013,7 +1828,7 @@ class GenericTaskEnvironment:
             return f"Error creating file: {e}"
 
     def _sre_str_replace(self, full_path: str, display_path: str, old_str: str, new_str: str) -> str:
-        """str_replace_editor str_replace — 精确字符串替换。"""
+
         if not os.path.isfile(full_path):
             return f"Error: {display_path} not found."
         try:
@@ -2033,7 +1848,7 @@ class GenericTaskEnvironment:
                 f"Include more context to make it unique."
             )
 
-        # Linter gate (Python only)
+
         new_content = content.replace(old_str, new_str, 1)
         if full_path.endswith('.py'):
             try:
@@ -2044,12 +1859,12 @@ class GenericTaskEnvironment:
                     f"File was NOT modified. Fix the syntax and retry."
                 )
 
-        # Save for undo
+
         self._edit_history[full_path] = content
         with open(full_path, 'w') as f:
             f.write(new_content)
 
-        # Show context around edit
+
         edit_pos = content.index(old_str)
         line_num = content[:edit_pos].count('\n') + 1
         new_lines = new_content.split('\n')
@@ -2060,7 +1875,7 @@ class GenericTaskEnvironment:
         return f"The file {display_path} has been edited. Here's the result of running `cat -n` on a snippet:\n{snippet}"
 
     def _sre_insert(self, full_path: str, display_path: str, insert_line, new_str: str) -> str:
-        """str_replace_editor insert。"""
+
         if not os.path.isfile(full_path):
             return f"Error: {display_path} not found."
         if insert_line is None:
@@ -2081,7 +1896,7 @@ class GenericTaskEnvironment:
             return f"Error: {e}"
 
     def _sre_undo(self, full_path: str, display_path: str) -> str:
-        """str_replace_editor undo_edit。"""
+
         if full_path not in self._edit_history:
             return f"No edit history for {display_path}."
         try:
@@ -2091,14 +1906,13 @@ class GenericTaskEnvironment:
         except Exception as e:
             return f"Error: {e}"
 
-    # ── Legacy 代码工具 handlers (保留给非 SWE-bench 任务) ──
 
     def _handle_list_files(self) -> str:
-        """list_files: 显示目录结构（优先用真实仓库）"""
+
         if self._repo_path:
             import subprocess
             try:
-                # 用 find 获取目录结构（只显示前 3 层 + .py 文件）
+
                 result = subprocess.run(
                     ["find", ".", "-maxdepth", "3", "-type", "f", "-name", "*.py",
                      "-not", "-path", "./.git/*", "-not", "-path", "*/test*/*",
@@ -2106,7 +1920,7 @@ class GenericTaskEnvironment:
                     cwd=self._repo_path, capture_output=True, text=True, timeout=10,
                 )
                 files = sorted(result.stdout.strip().split('\n'))
-                # 按目录分组
+
                 dirs: Dict[str, list] = {}
                 for f in files:
                     if not f.strip():
@@ -2145,14 +1959,7 @@ class GenericTaskEnvironment:
         return f"[list_files] [OK] {len(self._code_workspace)} file(s) in workspace:\n" + "\n".join(files_info)
 
     def _resolve_repo_path(self, path: str) -> str:
-        """Resolve model-provided paths inside the current SWE worktree.
 
-        Local models often copy absolute paths from earlier observations.  In
-        parallel SWE runs those /tmp/swe_* worktree prefixes differ by episode,
-        so a stale absolute prefix should not make an otherwise valid source
-        path unreadable.  This helper maps existing relative suffixes back into
-        the current repo without inventing files.
-        """
         clean = str(path or "").strip().rstrip("/")
         if not self._repo_path:
             return clean
@@ -2163,8 +1970,8 @@ class GenericTaskEnvironment:
         if os.path.exists(clean):
             return clean
         parts = [p for p in clean.split(os.sep) if p]
-        # Try every suffix, preferring longer suffixes. This generically maps
-        # /tmp/swe_xxx/pkg/sub/file.py -> <current_worktree>/pkg/sub/file.py.
+
+
         for i in range(len(parts)):
             rel = os.path.join(*parts[i:])
             cand = os.path.join(self._repo_path, rel)
@@ -2173,23 +1980,23 @@ class GenericTaskEnvironment:
         return clean
 
     def _handle_search_code(self, args: Dict) -> str:
-        """search_code: 在仓库或 workspace 中搜索（支持 regex）"""
+
         query = args.get("query", "")
         file_pattern = args.get("file_pattern", "")
 
-        # v5: 真实仓库搜索 (grep -rn，排除 tests/docs)
+
         if self._repo_path:
             import subprocess
 
-            # 智能查询处理：长查询 → 提取关键词
+
             search_query = query
             if len(query) > 60:
-                # 提取有意义的标识符（CamelCase, snake_case, 长单词）
+
                 tokens = re.findall(r'[A-Z][a-z]+(?:[A-Z][a-z]+)*|[a-z_]{4,}|[A-Z]{2,}', query)
                 if tokens:
-                    # 用最长/最特殊的 token 搜索
+
                     tokens = sorted(set(tokens), key=len, reverse=True)[:3]
-                    search_query = tokens[0]  # 用最特殊的一个词
+                    search_query = tokens[0]  
 
             try:
                 _exclude = ["--exclude-dir=tests", "--exclude-dir=test",
@@ -2201,13 +2008,7 @@ class GenericTaskEnvironment:
                     return "\n".join(l[:150] for l in text.strip().split("\n")[:limit] if l.strip())
 
                 def _relaxed_source_hint(pattern_files=None) -> str:
-                    """Fallback suggestions for over-specific or regex-like queries.
 
-                    The hint is derived only from source grep results.  It helps
-                    with local-model loops such as searching `_ticklabel1` when
-                    the repo uses `ticklabel`, or regex-like display queries when a
-                    shorter literal token is more searchable.
-                    """
                     raw_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", str(search_query or ""))
                     stop = {
                         "class", "def", "return", "self", "from", "import",
@@ -2246,14 +2047,7 @@ class GenericTaskEnvironment:
                     return ""
 
                 def _issue_member_query_note() -> str:
-                    """Surface issue-visible Class.member names when a NO_MATCH query
-                    drifts away from them.
 
-                    This is purely a visibility/memory aid: the names come from the
-                    user-visible issue text and the note is only attached to
-                    searches that returned no exact source hit.  It does not
-                    prescribe an edit or use evaluator/gold data.
-                    """
                     mentions = self._swe_issue_member_mentions()
                     if not mentions:
                         return ""
@@ -2273,9 +2067,8 @@ class GenericTaskEnvironment:
 
                 target_files = None
                 if file_pattern:
-                    # Robust file filtering. GNU grep --include can behave
-                    # surprisingly with path-like patterns and basename-only
-                    # filters, so resolve candidate files explicitly first.
+
+
                     fp = file_pattern.strip().lstrip("./")
                     fp_abs = os.path.join(self._repo_path, fp)
                     if "/" in fp and os.path.isfile(fp_abs):
@@ -2291,8 +2084,8 @@ class GenericTaskEnvironment:
                             if p.strip()
                         )
                     else:
-                        # Support both basename filters ("contour.py") and
-                        # globs ("*.py" / "lib/matplotlib/*.py").
+
+
                         find_args = ["find", ".", "-type", "f", "-not", "-path", "./.git/*"]
                         if any(ch in fp for ch in "*?[]"):
                             if "/" in fp:
@@ -2303,9 +2096,8 @@ class GenericTaskEnvironment:
                             if "/" in fp:
                                 find_args.extend(["-path", f"*{fp}*"])
                             else:
-                                # If it looks like an exact filename
-                                # ("scales.py", "contour.py"), keep it exact;
-                                # otherwise allow basename substring search.
+
+
                                 find_args.extend(["-name", fp if "." in fp else f"*{fp}*"])
                         find_result = subprocess.run(
                             find_args, cwd=self._repo_path,
@@ -2315,13 +2107,8 @@ class GenericTaskEnvironment:
                             p for p in find_result.stdout.strip().split("\n")
                             if p.strip()
                         )
-                        # Do not silently miss most of a large project when
-                        # the supervisor passes a broad pattern such as
-                        # "*.py".  The previous 200-file cap made searches in
-                        # repos with docs/examples sorted first miss real
-                        # source files (e.g. package submodules).  Keep a high
-                        # safety cap to avoid OS argv limits while preserving
-                        # broad search quality.
+
+
                         max_grep_files = _coerce_int(os.environ.get("SWE_SEARCH_MAX_FILES"), 5000)
                         target_files = all_target_files[:max_grep_files]
                     if target_files and len(target_files) > _coerce_int(os.environ.get("SWE_SEARCH_MAX_FILES"), 5000):
@@ -2340,7 +2127,7 @@ class GenericTaskEnvironment:
                     capture_output=True, text=True, timeout=15,
                 )
                 if result.returncode == 2:
-                    # Invalid regex: retry as a fixed-string search.
+
                     if file_pattern and target_files:
                         cmd = ["grep", "-nH", "-F", "-I", "-C", "2", "-m", "20", search_query] + target_files
                     else:
@@ -2356,11 +2143,8 @@ class GenericTaskEnvironment:
                         sample_files = ", ".join((target_files or [])[:5])
                         more = "" if not target_files or len(target_files) <= 5 else f", ... ({len(target_files)} files)"
                         global_hint = ""
-                        # Helpful generic fallback: if the query is absent
-                        # from the narrowed file_pattern, show whether it
-                        # exists elsewhere. This keeps the model from getting
-                        # stuck in the wrong file while still preserving its
-                        # choice of what to inspect/edit.
+
+
                         cmd_global = ["grep", "-rn", "-E", "-I", "--include=*.py", "-C", "1"] + _exclude
                         cmd_global.extend(["-m", "10", search_query, "."])
                         g = subprocess.run(
@@ -2404,7 +2188,7 @@ class GenericTaskEnvironment:
                             f"{issue_member_note}"
                             f"{relaxed_hint}"
                         )
-                    # Retry including tests
+
                     cmd2 = ["grep", "-rn", "-E", "-I", "--include=*.py",
                             "--exclude-dir=.git", "-C", "2",
                             "-m", "15", search_query, "."]
@@ -2422,7 +2206,7 @@ class GenericTaskEnvironment:
                         )
                     output = result.stdout.strip()
                 if not output:
-                    # 尝试文件名搜索
+
                     find_result = subprocess.run(
                         ["find", ".", "-name", f"*{search_query}*", "-type", "f",
                          "-not", "-path", "./.git/*"],
@@ -2461,9 +2245,8 @@ class GenericTaskEnvironment:
                             f"{_coerce_int(ph_line, 1) + 10}) for `{ph_name}`."
                         )
                     if placeholder:
-                        # Neutral evidence only.  Do not prescribe a next
-                        # action; the supervisor should decide how to use this
-                        # source location.
+
+
                         hint = (
                             "[SWE_NOTE] Existing placeholder/NotImplemented source location "
                             f"matching the query name.{placeholder}\n"
@@ -2474,7 +2257,7 @@ class GenericTaskEnvironment:
             except Exception as e:
                 return f"[search_code] [ERROR] {e}"
 
-        # Fallback: in-memory workspace search
+
         if not self._code_workspace:
             return f"[search_code] [ERROR] No code workspace loaded."
         import fnmatch
@@ -2487,13 +2270,7 @@ class GenericTaskEnvironment:
         matches = []
 
         def _workspace_path_matches(path: str, pattern: str) -> bool:
-            """Match in-memory workspace paths like repo search does.
 
-            Models often pass basename filters such as ``python.py`` while the
-            workspace key is ``sphinx/domains/python.py``.  Treat basename and
-            path-substring filters as valid evidence filters instead of
-            returning a misleading no-match.
-            """
             if not pattern:
                 return True
             fp = str(pattern).strip().lstrip("./")
@@ -2538,7 +2315,7 @@ class GenericTaskEnvironment:
         return f"[search_code] [OK] {hint}{len(matches)} match(es):\n" + "\n".join(matches[:30])
 
     def _handle_view_file(self, args: Dict) -> str:
-        """view_file: 读取文件内容（SWE-agent 风格智能窗口）"""
+
         path = args.get("path", "")
         if self._task_type == "code_generation" and not str(path or "").strip():
             return (
@@ -2546,18 +2323,18 @@ class GenericTaskEnvironment:
                 "No file content was returned because the requested path was empty."
             )
 
-        # v5: 从真实仓库读取
+
         if self._repo_path:
             clean_path = path.strip()
             full_path = self._resolve_repo_path(clean_path)
             if not os.path.exists(full_path):
-                # 再尝试相对路径
+
                 full_path = os.path.join(self._repo_path, clean_path.lstrip("./").rstrip("/"))
                 if not os.path.exists(full_path):
                     return f"[view_file] [ERROR] File '{path}' not found. Use search_code or list_files to find files."
-            # 目录 → 显示目录内容（在下面处理）
+
             if os.path.isdir(full_path):
-                pass  # handled below
+                pass  
             else:
                 try:
                     with open(full_path, 'r', errors='replace') as f:
@@ -2570,7 +2347,7 @@ class GenericTaskEnvironment:
             avail = list(self._code_workspace.keys())[:20]
             return f"[view_file] [ERROR] File '{path}' not found. Available files: {avail}"
 
-        # v5: 支持目录查看
+
         actual_path = locals().get('full_path') if self._repo_path else None
         if actual_path and os.path.isdir(actual_path):
             import subprocess
@@ -2593,10 +2370,8 @@ class GenericTaskEnvironment:
         else:
             start_val = _coerce_int(args.get("start_line", 1), 1)
         if has_start and not has_end:
-            # A start-only request should mean "show the local window starting
-            # here", not "dump everything to EOF".  Large accidental ranges
-            # were a main source of SWE context overflows; adjacent windows can
-            # still be requested explicitly with start_line/end_line.
+
+
             end_val = start_val + view_max_lines - 1
         else:
             end_val = _coerce_int(args.get("end_line", total), total)
@@ -2606,7 +2381,7 @@ class GenericTaskEnvironment:
             end = min(total, start + 1)
         range_note = ""
 
-        # 防止 context 溢出：无范围查看超大文件时用 filemap
+
         if not has_range and total > 500 and path.endswith('.py'):
             filemap = self._generate_filemap(content, path)
             if filemap:
@@ -2615,7 +2390,7 @@ class GenericTaskEnvironment:
                     f"{filemap}\n\n"
                     f"No full-file content is shown in this observation."
             )
-            # filemap 失败 → 只显示前 200 行
+
             end = min(total, 200)
         elif has_range and (end - start) > view_max_lines:
             requested_start, requested_end = start + 1, end
@@ -2634,10 +2409,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _generate_filemap(content: str, path: str) -> Optional[str]:
-        """生成文件结构图（SWE-agent filemap 核心功能）。
 
-        用 Python ast 解析文件，显示类/函数签名和行号，省略长函数体。
-        """
         import ast
         try:
             tree = ast.parse(content)
@@ -2646,7 +2418,7 @@ class GenericTaskEnvironment:
 
         lines = content.split('\n')
         result = []
-        # 收集所有 class/function 定义
+
         for node in ast.walk(tree):
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 start = node.lineno
@@ -2654,7 +2426,7 @@ class GenericTaskEnvironment:
                 body_len = end - start
 
                 indent = ""
-                # 检查是否是方法（在 class 内）
+
                 for parent in ast.walk(tree):
                     if isinstance(parent, ast.ClassDef):
                         for child in parent.body:
@@ -2673,7 +2445,7 @@ class GenericTaskEnvironment:
                     if body_len > 3:
                         result.append((start + 0.5, f"     | ...({body_len} lines)"))
 
-        # 加 imports（前 10 行）
+
         imports = []
         for i, line in enumerate(lines[:15]):
             stripped = line.strip()
@@ -2694,12 +2466,7 @@ class GenericTaskEnvironment:
         self,
         instruction: str,
     ) -> List[Tuple[str, str]]:
-        """Extract literal old→new pairs from an edit instruction.
 
-        The extraction uses only the supervisor-visible instruction.  It is
-        intentionally conservative and is used both for safe direct
-        replacements and for post-edit state checks.
-        """
         import re as _re
 
         text = " ".join(str(instruction or "").strip().split())
@@ -2708,7 +2475,7 @@ class GenericTaskEnvironment:
         candidates: List[Tuple[str, str]] = []
         q = r"['\"`]"
 
-        # "replace `old` with `new`" / "change 'old' to 'new'"
+
         for m in _re.finditer(
             rf"\b(?:replace|change)\s+(?:the\s+text\s+)?(?P<q1>{q})(?P<old>.+?)(?P=q1)\s+(?:with|to)\s+(?P<q2>{q})(?P<new>.+?)(?P=q2)",
             text,
@@ -2716,7 +2483,7 @@ class GenericTaskEnvironment:
         ):
             candidates.append((m.group("old"), m.group("new")))
 
-        # "change the comparison from `old` to `new`" / "line 54 from ..."
+
         for m in _re.finditer(
             rf"\bfrom\s+(?P<q1>{q})(?P<old>.+?)(?P=q1)\s+to\s+(?P<q2>{q})(?P<new>.+?)(?P=q2)",
             text,
@@ -2724,7 +2491,7 @@ class GenericTaskEnvironment:
         ):
             candidates.append((m.group("old"), m.group("new")))
 
-        # Unquoted code atoms for simple symbol/attribute replacements.
+
         code_atom = (
             r"[A-Za-z_][A-Za-z0-9_]*"
             r"(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
@@ -2758,27 +2525,16 @@ class GenericTaskEnvironment:
         file_content: str,
         edit_context: str = "",
     ) -> Optional[Tuple[str, str]]:
-        """Handle safe exact text replacements described by the supervisor.
 
-        This is a generic edit-tool reliability path: it
-        uses only the model's instruction and the visible target source.  Many
-        SWE edit requests are literally "replace X with Y"; routing those
-        through M_exec often produced malformed JSON around escaped newlines.
-        When X is present in the file and can be localized safely, perform the
-        exact replacement directly.
-        """
         for old, new in self._literal_replacement_candidates_from_instruction(instruction):
             if old not in file_content:
                 continue
 
-            # If the target text is globally unique, replacing the token itself
-            # is unambiguous and keeps the diff minimal.
+
             if file_content.count(old) == 1:
                 return old, new
 
-            # Otherwise localize to a unique source line that was part of the
-            # focused edit context.  This avoids changing an earlier unrelated
-            # occurrence when the same token appears multiple times.
+
             for line in file_content.splitlines(keepends=True):
                 if old not in line:
                     continue
@@ -2797,11 +2553,7 @@ class GenericTaskEnvironment:
         extra_context: str = "",
         strict_note: str = "",
     ) -> Tuple[str, str]:
-        """调用 M_exec 根据 NL instruction 生成精确 (old_content, new_content)。
 
-        Orchestration/Execution 分离：Supervisor (π_θ) 只描述要改什么，
-        M_exec (冻结 9B base) 生成精确的字符串替换对。
-        """
         import json as _json
         import re as _re
         import ast as _ast
@@ -2854,11 +2606,8 @@ class GenericTaskEnvironment:
             instruction=prompt, context="", task_type="code_generation",
             max_tokens=4096,
         )
-        # Extract JSON (tolerant to surrounding text / markdown fence).  Some
-        # executor generations start with a valid JSON object and then add
-        # trailing prose, while others include braces inside strings.  Prefer a
-        # small balanced-object scanner over a single greedy regex so we do not
-        # incorrectly report "no JSON found" when a parseable object is present.
+
+
         def _looks_like_edit_object(text: str) -> bool:
             return (
                 ('"old_content"' in text or "'old_content'" in text)
@@ -2914,19 +2663,12 @@ class GenericTaskEnvironment:
         m = _re.search(r'\{[\s\S]*(?:"old_content"|\'old_content\')[\s\S]*(?:"new_content"|\'new_content\')[\s\S]*\}', raw)
         if m:
             candidates.append(m.group(0))
-        # Deduplicate while preserving order.
+
         seen_json = set()
         candidates = [c for c in candidates if not (c in seen_json or seen_json.add(c))]
 
         def _repair_missing_final_string_quote(text: str) -> Optional[Dict[str, str]]:
-            """Repair a common executor shape:
 
-            {"old_content": "...", "new_content": "...}
-
-            The body is otherwise complete and uses JSON escapes, but the final
-            quote before the closing brace is missing.  We only repair this
-            narrow form; syntax checks still gate the resulting edit.
-            """
             s = (text or "").strip()
             brace = s.find("{")
             if brace > 0:
@@ -2952,11 +2694,7 @@ class GenericTaskEnvironment:
             except Exception:
                 pass
 
-            # raw_decode failed on new_content.  Accept only the narrow case
-            # where a JSON string begins at new_start and the object has a
-            # final closing brace but the string quote immediately before it is
-            # missing.  This avoids fabricating content from a truly truncated
-            # generation.
+
             if new_start >= len(s) or s[new_start] != '"':
                 return None
             tail = s[new_start + 1:].rstrip()
@@ -2982,8 +2720,8 @@ class GenericTaskEnvironment:
                 return repaired.get("old_content", ""), repaired.get("new_content", "")
             raw_s = raw.strip()
             if raw_s.startswith("{") and "old_content" in raw_s and "new_content" in raw_s:
-                # A likely partial/truncated JSON object.  Returning a precise
-                # error lets the strict retry ask for a shorter exact object.
+
+
                 raise ValueError(f"partial JSON object in M_exec output. Raw first 400: {raw[:400]}")
             raise ValueError(f"no JSON found in M_exec output. Raw first 400: {raw[:400]}")
         last_error = None
@@ -3026,21 +2764,13 @@ class GenericTaskEnvironment:
         window_before: int = 60,
         window_after: int = 90,
     ) -> str:
-        """Return a focused excerpt for M_exec edit generation.
 
-        Large files were previously truncated head+tail before being sent to
-        M_exec, which often removed the exact region the supervisor had just
-        viewed (e.g. "after line 978"). For NL edit_file, the executor needs
-        the local anchor text more than the whole file.
-        """
         lines = file_content.splitlines()
         total = len(lines)
         if total == 0:
             return file_content
-        # For small source files, give M_exec the whole file.  Several fixes
-        # need a local import plus a nearby condition change; a narrow line
-        # window around the condition hides the import section and causes the
-        # executor to propose non-contiguous old_content that cannot match.
+
+
         full_file_max = _coerce_int(os.environ.get("SWE_EDIT_FULL_FILE_MAX_LINES", 180), 180)
         if total <= full_file_max:
             return file_content
@@ -3064,14 +2794,7 @@ class GenericTaskEnvironment:
             )
 
         def _line_for_class_method(class_name: str, method_name: str) -> Optional[int]:
-            """Find a method definition inside a class in the target file.
 
-            This is generic edit-tool targeting, not a task-specific rule: many
-            supervisor edit requests name targets as ``Class.method``.  A plain
-            substring search can instead land on imports, peer classes, or the
-            first method with the same name; using AST keeps the executor's
-            File-content block focused on the supervisor-selected object.
-            """
             try:
                 import ast as _ast
                 tree = _ast.parse(file_content)
@@ -3087,7 +2810,7 @@ class GenericTaskEnvironment:
                                 if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and child.name == method_name:
                                     return int(child.lineno)
                         stack[0:0] = [c for c in node.body if isinstance(c, _ast.ClassDef)]
-            # Regex fallback for files that cannot be parsed by this runtime.
+
             m_cls = re.search(rf"(?m)^([ \t]*)class\s+{re.escape(class_name)}\b", file_content)
             if not m_cls:
                 return None
@@ -3107,7 +2830,7 @@ class GenericTaskEnvironment:
             return None
 
         def _recent_same_file_window() -> Optional[str]:
-            """Most recent model-visible view for this file, if it has a line range."""
+
             norm_path = path.strip().lstrip("./")
             for t in reversed(getattr(traj, "turns", []) or []):
                 if getattr(t, "action_type", "") != "view_file":
@@ -3131,21 +2854,14 @@ class GenericTaskEnvironment:
             return None
 
         def _anchor_window_from_instruction() -> Optional[str]:
-            """Window around concrete code anchors named in the edit request.
 
-            This is source-only targeting: when the supervisor names symbols
-            already present in the target file (e.g. ``format_ticks`` or
-            ``s_vmax``), give M_exec the local block around that symbol rather
-            than a broad/older view window that may omit the actual insertion
-            point. No evaluator patch or tests are used.
-            """
             anchors = []
             anchors.extend(re.findall(r"`([^`]{4,120})`", instruction))
             anchors.extend(re.findall(r"'([^']{4,120})'", instruction))
             anchors.extend(re.findall(r'"([^"]{4,120})"', instruction))
             anchors.extend(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b", instruction))
             anchors.extend(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{5,}\b", instruction))
-            # Prefer code-like anchors over prose words of the same length.
+
             def _anchor_rank(a: str) -> Tuple[int, int, str]:
                 return (
                     1 if ("_" in a or "." in a or re.search(r"[A-Z]", a)) else 0,
@@ -3161,9 +2877,7 @@ class GenericTaskEnvironment:
                     return _window(line_no)
             return None
 
-        # 1) Explicit line number/range in instruction: "after line 978",
-        # "line 978", "lines 540-543".  Use a narrower window than generic
-        # symbol targeting so duplicate nearby patterns do not steal the edit.
+
         m = re.search(
             r"(?:after|before|around|at)?\s*lines?\s+(\d+)(?:\s*[-–]\s*(\d+))?",
             instruction,
@@ -3177,10 +2891,7 @@ class GenericTaskEnvironment:
             except Exception:
                 pass
 
-        # 1b) Dotted class method targets: "Class.method" or
-        # "Class.method(...)".  Handle this before generic anchors such as
-        # addnodes.desc_annotation or handle_signature, which may appear in
-        # peer classes earlier in the file.
+
         dotted_targets = re.findall(
             r"\b([A-Z][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b",
             instruction,
@@ -3194,32 +2905,21 @@ class GenericTaskEnvironment:
             if line_no:
                 return _window(line_no)
 
-        # 1c) Concrete code anchors in the edit request.  This must run before
-        # recent-view fallback: a model may view a nearby setup block and then
-        # ask to edit a later named condition/variable that was outside that
-        # view.  Using the named source anchor keeps M_exec on the requested
-        # local code.
+
         anchor_window = _anchor_window_from_instruction()
         if anchor_window:
             return anchor_window
 
-        # 1d) In normal SWE behavior the supervisor views the relevant local
-        # source window immediately before asking edit_file.  Prefer that
-        # observed window over a broad function-level excerpt, which can
-        # contain duplicate patterns hundreds of lines apart.
+
         recent_window = _recent_same_file_window()
         if recent_window:
             return recent_window
 
-        # 2) Named class/function definitions.  Generic substring search for a
-        # class name can hit imports, comments, subclasses, or method calls
-        # before the actual definition.  Prefer the real `class X` / `def X`
-        # block when the supervisor says "X class", "class X", "X function",
-        # or "in X".
+
         class_names = []
         class_names.extend(re.findall(r"\bclass\s+([A-Z][A-Za-z0-9_]*)\b", instruction))
         class_names.extend(re.findall(r"\b([A-Z][A-Za-z0-9_]*)\s+class\b", instruction))
-        # Also infer common "in Class ... method/function" phrasing.
+
         class_names.extend(re.findall(r"\bin\s+([A-Z][A-Za-z0-9_]*)\b", instruction))
         func_names_for_pair = []
         func_names_for_pair.extend(re.findall(r"\b(?:function|method|def)\s+([A-Za-z_][A-Za-z0-9_]*)\b", instruction, flags=re.I))
@@ -3245,18 +2945,12 @@ class GenericTaskEnvironment:
                 line_no = file_content[:m_fn.start()].count("\n") + 1
                 return _window(line_no)
 
-        # 3) Specific code identifiers or quoted anchors mentioned in the
-        # instruction.  Usually handled before recent-view fallback above; keep
-        # this late retry for requests where class/function detection consumed
-        # no match and the anchor was not found earlier due to an unusual
-        # ranking/tie.
+
         anchor_window = _anchor_window_from_instruction()
         if anchor_window:
             return anchor_window
 
-        # 4) Most recent view_file window for the same path (fallback; the
-        # preferred recent-window check above only returns if it can recover a
-        # real line range from the tool observation or args).
+
         recent_window = _recent_same_file_window()
         if recent_window:
             return recent_window
@@ -3264,14 +2958,7 @@ class GenericTaskEnvironment:
         return file_content
 
     def _recent_view_context(self, path: str, traj: "Trajectory", max_chars: int = 3500) -> str:
-        """Collect recent view/search snippets as read-only API/pattern context.
 
-        M_exec receives only the focused target file excerpt.  Recent search
-        observations are included here so the executor can see, for example,
-        that a supervisor-suggested API name produced NO_MATCH and should not
-        be treated as authoritative.  This is still only model-visible source
-        evidence from the same episode, never gold/test feedback.
-        """
         norm_path = str(path or "").strip().lstrip("./")
         snippets = []
         for t in reversed(getattr(traj, "turns", []) or []):
@@ -3286,8 +2973,8 @@ class GenericTaskEnvironment:
             obs = self._strip_swe_memory(obs)
             if action == "view_file":
                 viewed = str(args.get("path", "")).strip().lstrip("./")
-                # The target file content is already supplied separately; include
-                # other recently viewed files for signatures and repository style.
+
+
                 if viewed == norm_path:
                     continue
                 snippets.append(f"[view_file {viewed}]\n{obs[:1200]}")
@@ -3295,20 +2982,15 @@ class GenericTaskEnvironment:
                 query = self._shorten_one_line(args.get("query") or "", 90)
                 pattern = self._shorten_one_line(args.get("file_pattern") or "", 70)
                 label = f"[search_code query={query!r}" + (f" file_pattern={pattern!r}" if pattern else "") + "]"
-                # Keep enough to preserve OK/NO_MATCH and first few hits, but
-                # not the full replay/memory block.
+
+
                 snippets.append(f"{label}\n{obs[:900]}")
             if sum(len(s) for s in snippets) >= max_chars:
                 break
         return "\n\n".join(reversed(snippets))[:max_chars]
 
     def _recent_view_locations(self, traj: "Trajectory", limit: int = 4) -> List[str]:
-        """Return compact recent view_file locations for model-visible state.
 
-        This is intentionally only a summary of observations the supervisor
-        already received.  It helps the model remember its evidence trail
-        without injecting any hidden evaluator information or forcing an edit.
-        """
         locations: List[str] = []
         seen = set()
         for t in reversed(getattr(traj, "turns", []) or []):
@@ -3332,7 +3014,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _strip_swe_memory(observation: str) -> str:
-        """Remove appended SWE memory blocks before re-summarizing observations."""
+
         text = str(observation or "")
         for marker in ("\n\n[SWE_MEMORY]", "\n[SWE_MEMORY]"):
             if marker in text:
@@ -3341,14 +3023,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _cap_swe_observation(observation: str, limit: Optional[int] = None) -> str:
-        """Bound one SWE tool observation while preserving the memory block.
 
-        Keeping every full grep/view result in every tool message caused some
-        longer SWE episodes to exceed the model context window.  The appended
-        SWE_MEMORY is the persistent history; individual oversized tool outputs
-        can be clipped to their head/tail without using hidden data or changing
-        the available tools.
-        """
         if limit is None:
             limit = _coerce_int(os.environ.get("SWE_OBS_MAX_CHARS", 3000), 3000)
         text = str(observation or "")
@@ -3375,7 +3050,7 @@ class GenericTaskEnvironment:
             )
         clipped = clipped_base + memory
         if len(clipped) > limit + 400:
-            # Last-resort guard if memory alone is large.
+
             clipped = clipped[: limit - 1].rstrip() + "…"
         return clipped
 
@@ -3387,7 +3062,7 @@ class GenericTaskEnvironment:
         return text[: max(0, limit - 1)].rstrip() + "…"
 
     def _summarize_search_observation(self, observation: str, max_hits: int = 3) -> str:
-        """Summarize search evidence already returned to the model."""
+
         obs = self._strip_swe_memory(observation)
         if "[NO_MATCH]" in obs:
             status = "NO_MATCH"
@@ -3417,7 +3092,7 @@ class GenericTaskEnvironment:
         return self._shorten_one_line(obs, 180) or status
 
     def _summarize_view_observation(self, observation: str, max_lines: int = 6) -> str:
-        """Summarize viewed source lines already returned to the model."""
+
         obs = self._strip_swe_memory(observation)
         if "[ERROR]" in obs:
             return self._shorten_one_line(obs, 180)
@@ -3441,8 +3116,8 @@ class GenericTaskEnvironment:
                 fallback.append((line_no, item))
             code_l = stripped.lower()
             score = 0
-            # Prefer lines that overlap the issue text; these are the facts the
-            # model needs to remember after several views/searches.
+
+
             for term in issue_terms:
                 if term in code_l:
                     score += 4
@@ -3468,7 +3143,7 @@ class GenericTaskEnvironment:
         return self._shorten_one_line(first, 180)
 
     def _summarize_edit_observation(self, observation: str) -> str:
-        """Summarize edit outcome already returned to the model."""
+
         obs = self._strip_swe_memory(observation)
         if "[NO_CHANGE_NET]" in obs:
             lines = []
@@ -3510,7 +3185,7 @@ class GenericTaskEnvironment:
         return self._shorten_one_line(obs, 180)
 
     def _compress_memory_items(self, items: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
-        """Collapse consecutive identical memory items into a counted entry."""
+
         compressed: List[Tuple[str, str]] = []
         i = 0
         while i < len(items):
@@ -3527,12 +3202,7 @@ class GenericTaskEnvironment:
         return compressed
 
     def _swe_issue_keywords(self, limit: int = 24) -> List[str]:
-        """Extract stable issue-visible keywords for memory relevance.
 
-        These come only from the user-visible issue text, never from gold
-        patches/tests.  They are used to keep memory entries tied to the issue
-        from being pushed out by later broad searches.
-        """
         issue = str(getattr(self, "_question", {}).get("question", "") or "")
         tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", issue)
         stop = {
@@ -3550,7 +3220,7 @@ class GenericTaskEnvironment:
                 continue
             counts[low] = counts.get(low, 0) + 1
             original.setdefault(low, tok)
-        # Prefer code-like identifiers and repeated issue terms.
+
         ranked = sorted(
             counts,
             key=lambda k: (
@@ -3561,13 +3231,7 @@ class GenericTaskEnvironment:
         return [original[k] for k in ranked[:limit]]
 
     def _swe_issue_source_frames(self, limit: int = 6) -> List[str]:
-        """Return issue-visible project source frames such as ``pkg/file.py:123``.
 
-        This is intentionally parsed only from the problem statement.  It is not
-        evaluator metadata, gold patch data, or hidden-test feedback; it simply
-        keeps user-visible traceback source locations available in SWE_MEMORY so
-        the supervisor can decide whether they matter.
-        """
         issue = str(getattr(self, "_question", {}).get("question", "") or "")
         frames: List[str] = []
         seen = set()
@@ -3577,9 +3241,8 @@ class GenericTaskEnvironment:
             if not path or not line:
                 continue
             low = path.lower()
-            # Keep source frames first; public tests may still be inspected by
-            # search_code, but this memory note is meant to highlight traceback
-            # source frames from the issue.
+
+
             if "/tests/" in low or low.startswith("tests/") or "/test_" in low or low.endswith("_test.py"):
                 continue
             loc = f"{path}:{line}"
@@ -3592,12 +3255,7 @@ class GenericTaskEnvironment:
         return frames
 
     def _swe_issue_member_mentions(self, limit: int = 6) -> List[Tuple[str, str]]:
-        """Return issue-visible ``Class.member`` style references.
 
-        These are parsed only from the user-visible problem statement.  They
-        are used as a compact memory cue for missing-member style issues and
-        never expose gold patches, tests, or evaluator feedback.
-        """
         issue = str(getattr(self, "_question", {}).get("question", "") or "")
         mentions: List[Tuple[str, str]] = []
         seen = set()
@@ -3613,13 +3271,7 @@ class GenericTaskEnvironment:
         return mentions
 
     def _swe_issue_member_state_note(self, memory_items: List[Tuple[str, str]]) -> str:
-        """Summarize visible state for issue-mentioned members.
 
-        The note is deliberately descriptive, not prescriptive: it only
-        restates whether the episode already observed the class/member search
-        states.  This helps avoid losing important "class exists but member def
-        was not found in that file" evidence in long source-navigation traces.
-        """
         mentions = self._swe_issue_member_mentions()
         if not mentions or not memory_items:
             return ""
@@ -3690,13 +3342,7 @@ class GenericTaskEnvironment:
         texts: List[str],
         limit: int = 8,
     ) -> str:
-        """Return a compact issue/source token-overlap note.
 
-        This is purely an episode-memory aid: it compares issue-visible
-        keywords with source/search text already returned to the model. It uses
-        no evaluation labels or evaluator feedback, and it does not
-        prescribe a next action.
-        """
         issue_keywords = self._swe_issue_keywords(limit=32)
         if not issue_keywords or not texts:
             return ""
@@ -3747,13 +3393,7 @@ class GenericTaskEnvironment:
         max_evidence: int = 6,
         max_chars: int = 1900,
     ) -> str:
-        """Build a compact historical memory for SWE source-tool episodes.
 
-        The memory is derived only from tool calls and observations already
-        visible to the model in this episode. It contains no evaluation labels
-        or evaluator feedback, and deliberately does
-        not prescribe a next action.
-        """
         max_turns = _coerce_int(os.environ.get("SWE_MEMORY_MAX_TURNS"), max_turns)
         max_evidence = _coerce_int(os.environ.get("SWE_MEMORY_MAX_EVIDENCE"), max_evidence)
         max_chars = _coerce_int(os.environ.get("SWE_MEMORY_MAX_CHARS"), max_chars)
@@ -3812,18 +3452,15 @@ class GenericTaskEnvironment:
         if not memory_items:
             return ""
 
-        # Persistent evidence ledger: do not let early useful source evidence
-        # disappear just because later steps wandered.  Keep source
-        # observations in insertion order, deduplicated by their summary text,
-        # and prefer entries tied to issue-visible keywords.
+
         evidence_pairs: List[Tuple[str, str]] = []
         seen_evidence = set()
 
         def _canonical_evidence_key(item: str) -> str:
             key = re.sub(r"\[REPEATED x\d+\]", "[REPEATED]", item)
             key = re.sub(r"\(same exact observation repeated x\d+\)", "", key)
-            # Repeated cached-search summaries differ only in replay wording;
-            # for memory purposes the query/status is the same evidence.
+
+
             key = re.sub(r"Cached result (?:excerpt|summary):.*", "Cached result", key)
             return self._shorten_one_line(key, 240)
 
@@ -3843,7 +3480,7 @@ class GenericTaskEnvironment:
                 for idx, (action, item) in enumerate(evidence_pairs)
             ]
             keep_indices = set()
-            # Always preserve a little chronology from the start and end.
+
             for idx in range(min(2, len(evidence_pairs))):
                 keep_indices.add(idx)
             for idx in range(max(0, len(evidence_pairs) - 2), len(evidence_pairs)):
@@ -3880,9 +3517,8 @@ class GenericTaskEnvironment:
                 repeated_tail_count += 1
             if repeated_tail_count >= 3:
                 repeated_tail_summary = self._shorten_one_line(memory_items[-1][1], 180)
-                # Compactly surface the last distinct evidence before a repeat
-                # loop.  This is historical state only; it does not prescribe a
-                # next action and does not use hidden data.
+
+
                 for prev_action, prev_item in reversed(memory_items[:-repeated_tail_count]):
                     if prev_action not in {"search_code", "view_file", "edit_file", "str_replace_editor"}:
                         continue
@@ -3951,11 +3587,8 @@ class GenericTaskEnvironment:
         tail_view_path = ""
         tail_view_count = 0
         tail_view_lines: List[int] = []
-        # Detect broad same-file browsing loops that are not exact duplicate
-        # calls (for example repeated ``view_file(path)`` auto-advancing across
-        # a large file).  This is model-visible state only: it records that the
-        # last observations are navigation-heavy while the diff is empty; it
-        # does not prescribe the next action and uses no evaluator feedback.
+
+
         for action, item in reversed(memory_items):
             if action != "view_file":
                 break
@@ -4105,10 +3738,8 @@ class GenericTaskEnvironment:
         lines.extend(f"- {item}" for _, item in recent)
         text = "\n".join(lines)
         if len(text) > max_chars:
-            # Preserve both the state header/early evidence and the recent
-            # action log at the tail.  A head-only cutoff drops the latest
-            # tool outcomes, which are exactly what the supervisor needs for
-            # the next decision.
+
+
             head = max(700, int(max_chars * 0.58))
             tail = max(500, max_chars - head - 120)
             omitted = len(text) - head - tail
@@ -4124,7 +3755,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _format_numbered_excerpt_from_content(content: str, center_line: int, radius: int = 5) -> str:
-        """Format a small numbered excerpt around a 1-indexed line number."""
+
         lines = content.splitlines()
         if not lines:
             return ""
@@ -4143,11 +3774,7 @@ class GenericTaskEnvironment:
         before: int = 8,
         after: int = 18,
     ) -> str:
-        """Return source context for a location already surfaced by a tool.
 
-        Used to make repeated exact search calls more informative without
-        adding tools or using hidden evaluator data.
-        """
         norm = str(path or "").strip().lstrip("./")
         content = ""
         if self._repo_path:
@@ -4172,7 +3799,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _python_syntax_error(content: str, path: str) -> Optional[SyntaxError]:
-        """Return the SyntaxError for a Python source string, or None."""
+
         try:
             compile(content, path, "exec")
             return None
@@ -4188,14 +3815,7 @@ class GenericTaskEnvironment:
         old_content: str,
         new_content: str,
     ) -> bool:
-        """Whether ``after`` is the same SyntaxError already present before.
 
-        Some SWE inputs expose a focused/truncated source file that is not a
-        complete importable module (for example an EOF-truncated tail).  The
-        edit tool should still reject newly introduced syntax errors, but it
-        should not block an otherwise local edit merely because an unchanged
-        pre-existing syntax error remains outside the edited region.
-        """
         if before is None or after is None:
             return False
         before_text = (before.text or "").strip()
@@ -4215,16 +3835,11 @@ class GenericTaskEnvironment:
         expected_after_line = before.lineno
         if before.lineno > old_end_line:
             expected_after_line += line_delta
-        # Allow tiny drift for parser line reporting around EOF/comment tails.
+
         return abs(after.lineno - expected_after_line) <= 2
 
     def _current_source_diff_summary(self, path: str) -> str:
-        """Summarize the current visible source diff for one file.
 
-        The summary is derived from the episode worktree or in-memory
-        workspace only.  It is meant to make cumulative edits visible to the
-        supervisor without exposing evaluator-only artifacts.
-        """
         try:
             if self._repo_path:
                 import subprocess
@@ -4266,12 +3881,7 @@ class GenericTaskEnvironment:
             return ""
 
     def _current_source_diff_excerpt(self, path: str, max_chars: int = 1400) -> str:
-        """Return a compact current diff excerpt for one file.
 
-        This is workspace state already produced by the agent's edits.  Showing
-        the exact hunk(s) prevents a misleading "edit OK" when the updated
-        snippet is far from the semantically relevant change.
-        """
         try:
             if self._repo_path:
                 import subprocess
@@ -4320,13 +3930,7 @@ class GenericTaskEnvironment:
         before_content: str,
         after_content: str,
     ) -> str:
-        """Check whether literal replacement text requested by the supervisor
-        is visible in the post-edit source.
 
-        This does not use evaluator artifacts. It only compares the
-        supervisor's own requested old/new literal strings against the source
-        before and after the tool-applied edit.
-        """
         notes = []
         for old, new in self._literal_replacement_candidates_from_instruction(instruction)[:3]:
             if old not in before_content:
@@ -4349,12 +3953,7 @@ class GenericTaskEnvironment:
         return " Post-edit requested-change note: " + "; ".join(notes) + "."
 
     def _workspace_diff_is_nonempty(self) -> bool:
-        """Return whether the current workspace has a source diff.
 
-        This is visible workspace state only.  It prevents stale "an edit
-        happened" memory from claiming a diff exists after later edits revert
-        the file back to the checkout state.
-        """
         try:
             if self._repo_path:
                 import subprocess
@@ -4372,18 +3971,13 @@ class GenericTaskEnvironment:
                     return True
             return False
         except Exception:
-            # If the status check itself fails, avoid falsely claiming there
-            # is a diff.  The final diff generator will still be authoritative.
+
+
             return False
 
     @staticmethod
     def _normalize_membership_literal_order_for_note(text: str) -> str:
-        """Normalize order of quoted literals inside ``x in [...]`` checks.
 
-        This is used only for a neutral post-edit warning: if the net source
-        diff disappears after sorting membership literal lists, then the patch
-        is likely just a Python membership-order no-op.
-        """
         def repl(m: re.Match) -> str:
             vals = re.findall(r"(['\"])(.*?)\1", m.group(1))
             if len(vals) < 2:
@@ -4394,12 +3988,7 @@ class GenericTaskEnvironment:
         return re.sub(r"\bin\s*\[([^\]\n]+)\]", repl, str(text or ""))
 
     def _net_membership_order_noop_note(self, path: str, current_content: str) -> str:
-        """Warn when the net patch only reorders literals in membership checks.
 
-        Compares the current file against the checked-out/original source.  It
-        uses no gold patch or tests; it only detects a Python semantic no-op in
-        the visible workspace diff.
-        """
         try:
             original = ""
             norm_path = str(path or "").strip().lstrip("./")
@@ -4432,14 +4021,7 @@ class GenericTaskEnvironment:
         return ""
 
     def _post_edit_option_swap_state_note(self, path: str, current_content: str) -> str:
-        """Return a positive source-state note for direct public-option swaps.
 
-        This compares only the visible checked-out source (git HEAD / original
-        workspace) with the current workspace.  It is not a gold patch check:
-        it simply states whether two issue-visible option literals that the
-        issue calls reversed/swapped now reach each other's original branch
-        computation.
-        """
         try:
             issue_text = str(getattr(self, "_question", {}).get("question", "") or "")
             issue_l = issue_text.lower()
@@ -4524,13 +4106,7 @@ class GenericTaskEnvironment:
         full_new_content: Optional[str] = None,
         path: Optional[str] = None,
     ) -> str:
-        """Build neutral post-edit consistency notes from visible state.
 
-        This does not reject or rewrite the supervisor's edit.  It surfaces
-        source-visible risks that syntax checking cannot catch, e.g. using an
-        API name after search_code reported NO_MATCH, or still reading an
-        issue-named unbound local outside the branch where it is assigned.
-        """
         notes: List[str] = []
         try:
             import difflib
@@ -4566,10 +4142,7 @@ class GenericTaskEnvironment:
             pre_edit_source_text = "\n".join(reversed(pre_edit_source_text_parts))
             pre_edit_visible_source_text = "\n".join(reversed(pre_edit_visible_source_parts))
 
-            # A syntactically valid edit can still add a class method at the
-            # wrong indentation, e.g. nested inside __init__ or an if-block.
-            # Only warn for issue-visible method names so legitimate local
-            # nested helper functions are not broadly penalized.
+
             try:
                 issue_member_names = {
                     member for _cls, member in self._swe_issue_member_mentions(limit=8)
@@ -4591,7 +4164,7 @@ class GenericTaskEnvironment:
                         for idx, src_line in enumerate(source_lines):
                             if src_line.strip() != stripped_added:
                                 continue
-                            # Find the nearest enclosing def/class by indentation.
+
                             enclosing_def = ""
                             enclosing_class = ""
                             for j in range(idx - 1, -1, -1):
@@ -4609,10 +4182,8 @@ class GenericTaskEnvironment:
                                 if m_prev_cls:
                                     enclosing_class = m_prev_cls.group(1)
                                     break
-                            # If a lower-indented def encloses the added issue
-                            # method before any class boundary, the new method is
-                            # likely nested in another method rather than at
-                            # class scope.
+
+
                             if enclosing_def:
                                 added_def_names.append(f"`{name}` under `{enclosing_def}`")
                             break
@@ -4624,10 +4195,7 @@ class GenericTaskEnvironment:
             except Exception:
                 pass
 
-            # If an edit only reorders literal members inside `x in [...]`,
-            # Python membership semantics are unchanged.  Surface this as a
-            # neutral consistency note; the agent still decides whether a
-            # second edit is needed.
+
             def _string_memberships(text: str) -> List[List[str]]:
                 groups: List[List[str]] = []
                 for m in re.finditer(r"\bin\s*\[([^\]\n]+)\]", text):
@@ -4646,11 +4214,7 @@ class GenericTaskEnvironment:
                     )
                     break
 
-            # Public option/flag semantic bugs are often not fixed by mapping
-            # the issue-visible option string to a different public option
-            # string before a helper that already has branches for the original
-            # strings.  This warning is source/issue-visible only and does not
-            # prescribe a patch.
+
             try:
                 issue_text = str(getattr(self, "_question", {}).get("question", "") or "")
                 issue_l = issue_text.lower()
@@ -4706,9 +4270,8 @@ class GenericTaskEnvironment:
                         body = "\n".join(lines[i + 1:i + 5])
                         m_assign = re.search(r"(?m)^\s*(offsets|result|value|ret|return_value)\s*=\s*(.+)$", body)
                         if not m_assign:
-                            # Offset/layout helpers often use a direct return
-                            # or a named assignment; keep the parser narrow to
-                            # avoid noisy warnings in unrelated edits.
+
+
                             continue
                         branches.append((lits, self._shorten_one_line(m_assign.group(0).strip(), 140)))
                     return branches
@@ -4719,18 +4282,13 @@ class GenericTaskEnvironment:
                     lit for lit in re.findall(r"[`'\"]([A-Za-z_][A-Za-z0-9_-]{1,40})[`'\"]", issue_text)
                     if re.search(rf"\b{re.escape(lit.lower())}\b", issue_l)
                 }
-                # Also include bare issue words that appear in quoted branch literals.
+
                 for lits, _expr in old_branches + new_branches:
                     for lit in lits:
                         if re.search(rf"\b{re.escape(lit.lower())}\b", issue_l):
                             issue_lit_set.add(lit)
 
-                # Compare each public option literal's computation before vs
-                # after the edit.  If an edit aimed at issue-mentioned options
-                # also changes non-issue option literals that were already
-                # visible in the same helper, surface that state.  This is a
-                # generic option-branch consistency check; it does not know the
-                # correct patch and does not block the edit.
+
                 def _literal_expr_map(branches: List[Tuple[Tuple[str, ...], str]]) -> Dict[str, str]:
                     out: Dict[str, str] = {}
                     for lits, expr in branches:
@@ -4746,9 +4304,8 @@ class GenericTaskEnvironment:
                         continue
                     if old_lit_expr[lit] == new_lit_expr[lit]:
                         continue
-                    # Only warn when the edit also touches at least one
-                    # issue-visible literal in the same option helper; this
-                    # avoids noise for refactors unrelated to issue literals.
+
+
                     if not any(
                         l in issue_lit_set
                         for l in set(old_lit_expr) | set(new_lit_expr)
@@ -4783,14 +4340,7 @@ class GenericTaskEnvironment:
                         + "; ".join(branch_formula_warnings[:2])
                     )
 
-                # If the issue describes public option values as reversed or
-                # swapped, a minimal source-grounded edit usually preserves the
-                # existing branch formulas and changes which literal reaches
-                # which formula.  Surface the opposite pattern: after an edit,
-                # an issue-visible literal is assigned a computation that was
-                # not one of the pre-edit computations for the issue-visible
-                # option literals.  This is generic current-source state, not a
-                # gold-patch rule.
+
                 def _option_expr_map_any(text: str) -> Dict[str, str]:
                     out: Dict[str, str] = {}
                     lines = text.splitlines()
@@ -4851,14 +4401,8 @@ class GenericTaskEnvironment:
                                 "branches; current source state changed formulas instead of only remapping existing "
                                 "option semantics: " + "; ".join(invented_issue_exprs[:4])
                             )
-                    # Reversed/swapped public-option reports normally require
-                    # some visible change to option selection/branching.  If an
-                    # edit only adjusts downstream arithmetic/offsets without
-                    # touching the issue-visible option literals or option
-                    # variable at all, surface that current-source state.  This
-                    # does not say what the patch should be; it prevents a
-                    # plausible-looking coordinate tweak from silently being
-                    # treated as an option-semantic fix.
+
+
                     change_text = added_text + "\n" + removed_text
                     source_has_issue_option_branches = bool(issue_option_lits)
                     touched_issue_literal = any(
@@ -4920,9 +4464,8 @@ class GenericTaskEnvironment:
                     continue
                 if re.search(rf"\b{re.escape(tok)}\b", pre_edit_source_text):
                     continue
-                # Defining a previously absent method/function can be a valid
-                # missing-method fix; warn only when the added code *calls* the
-                # no-match name.
+
+
                 if re.search(rf"(?m)^\s*(?:async\s+def|def|class)\s+{re.escape(tok)}\b", added_text):
                     continue
                 if (
@@ -4942,10 +4485,8 @@ class GenericTaskEnvironment:
                 query = no_match_attrs.get(attr)
                 if not query:
                     continue
-                # Warn only if the exact dotted attribute was not already seen
-                # before this edit.  The bare word may occur in issue prose or
-                # variable names; what matters here is the source-visible API
-                # shape `.attr`.
+
+
                 if re.search(rf"\.\s*{re.escape(attr)}\b", pre_edit_visible_source_text):
                     continue
                 item = f"`.{attr}` (query `{self._shorten_one_line(query, 60)}`)"
@@ -4971,11 +4512,8 @@ class GenericTaskEnvironment:
                     name_l = name.lower()
                     if name_l == tok_l or tok_l not in name_l:
                         continue
-                    # Example of the generic pattern: search for `offset`
-                    # returned NO_MATCH in the target source, then the edit
-                    # adds `get_offset()` on a framework object.  This may be a
-                    # valid external API, but it is unverified by visible
-                    # source evidence and should be surfaced as state.
+
+
                     if re.search(rf"\b{re.escape(name)}\s*\(", added_text) or re.search(
                         rf"\.\s*{re.escape(name)}\b", added_text
                     ):
@@ -4996,10 +4534,7 @@ class GenericTaskEnvironment:
                     "added code passes `fillvalue=` to builtin `zip(...)`; Python's builtin zip does not accept that keyword, so dimension-padding needs an appropriate helper/import pattern"
                 )
 
-            # Syntax checking does not catch all call-shape errors.  For
-            # local functions visible in the edited source, surface the generic
-            # Python error pattern where a parameter is supplied positionally
-            # and again by keyword in the same call.
+
             try:
                 import ast
                 import difflib
@@ -5051,13 +4586,7 @@ class GenericTaskEnvironment:
                             + "; ".join(duplicate_arg_notes)
                         )
 
-                    # Syntax checks do not catch NameError risks.  If a changed
-                    # line introduces a new bare name that is not imported,
-                    # assigned, defined, a function argument, or a builtin in
-                    # the current file, surface that current-source state.  This
-                    # is intentionally a warning only: the supervisor still
-                    # decides whether the name is an acceptable external/global
-                    # dependency or whether another edit is needed.
+
                     try:
                         import builtins as _builtins
                         import keyword as _keyword
@@ -5134,14 +4663,7 @@ class GenericTaskEnvironment:
                                     + ", ".join(f"`{n}`" for n in missing_names)
                                 )
 
-                        # Cumulative variant: a later import edit can leave a
-                        # name introduced by a previous edit unresolved (for
-                        # example `from pkg.mod import fn` does not bind the
-                        # top-level name `pkg`, while the current diff still
-                        # calls `pkg.mod.fn(...)`).  Compare the current file
-                        # against the checked-out/original file so the warning
-                        # is about the whole pending patch, not only this
-                        # edit's added lines.
+
                         original_for_cumulative = ""
                         try:
                             if path and self._repo_path:
@@ -5269,11 +4791,8 @@ class GenericTaskEnvironment:
                 )
 
             if "memoryview" in added_text and "memoryview" in issue_l_for_format:
-                # Source-state warning for bytes-like conversion bugs: if an
-                # edit only excludes memoryview from an iterator branch but the
-                # central make_bytes-style helper still lacks a direct
-                # memoryview/bytes(value) branch, the visible path can still
-                # fall through to str(value).encode(...).
+
+
                 helper_lacks_memoryview = False
                 helper_match = re.search(
                     r"(?s)def\s+make_bytes\s*\([^)]*\):(?P<body>.*?)(?=^\s{0,8}(?:def|class)\s|\Z)",
@@ -5291,10 +4810,7 @@ class GenericTaskEnvironment:
                         "added code treats `memoryview` as a non-iterated content value, but visible `make_bytes()` source still lacks a direct `memoryview`/`bytes(value)` branch, so the value may still reach generic string conversion"
                     )
 
-            # Syntax checks do not catch old-style %-format runtime errors.
-            # If a newly added/changed line has an obvious string `% (...)`
-            # operation, compare the visible conversion placeholders with the
-            # visible tuple arity.
+
             percent_format_warnings = []
             for line in added_lines:
                 m_fmt = re.search(r"(['\"])(.*?)(?<!\\)\1\s*%\s*\((.*)\)", line)
@@ -5302,9 +4818,8 @@ class GenericTaskEnvironment:
                     continue
                 fmt_body = m_fmt.group(2)
                 args_body = m_fmt.group(3).strip()
-                # Remove escaped literal percent signs before counting
-                # conversion placeholders.  Keep this deliberately simple and
-                # only warn on clear mismatches.
+
+
                 fmt_clean = fmt_body.replace("%%", "")
                 placeholders = re.findall(
                     r"%(?:\([^)]+\))?[#0 +\\-]?(?:\d+|\*)?(?:\.\d+)?[bcdeEfFgGnosxXrisa]",
@@ -5321,7 +4836,7 @@ class GenericTaskEnvironment:
                         depth = max(0, depth - 1)
                     elif ch == "," and depth == 0:
                         arg_count += 1
-                # A trailing comma after a single item is not an extra arg.
+
                 if args_body.endswith(",") and arg_count > 1:
                     arg_count -= 1
                 if arg_count and len(placeholders) != arg_count:
@@ -5334,9 +4849,7 @@ class GenericTaskEnvironment:
                     + "; ".join(percent_format_warnings[:2])
                 )
 
-            # Import/use consistency: catch cases like `import itertools` then
-            # calling `zip_longest(...)` unqualified.  This is a syntax-valid
-            # but runtime-risky pattern that the syntax check cannot detect.
+
             try:
                 import importlib
                 imported_modules: Dict[str, str] = {}
@@ -5393,11 +4906,8 @@ class GenericTaskEnvironment:
                         "import/call style mismatch in added lines: "
                         + "; ".join(import_style_warnings[:2])
                     )
-                # Cumulative variant: if the current edit only adds
-                # `import module` after a previous edit already added an
-                # unqualified call like `name(...)`, the added-lines-only check
-                # above cannot see the mismatch.  Use the current source file as
-                # visible workspace state, but keep the warning generic.
+
+
                 try:
                     import builtins as _builtins
                     cumulative_direct_imports = set(directly_imported_names)
@@ -5449,10 +4959,7 @@ class GenericTaskEnvironment:
             except Exception:
                 pass
 
-            # Added attribute reads/calls that were not visible in source or
-            # search evidence before the edit are often guessed framework APIs.
-            # Warn only for reads/calls (not assignments) and skip visible
-            # module aliases/common Python attributes to avoid over-noise.
+
             common_attrs = {
                 "append", "extend", "insert", "remove", "pop", "clear",
                 "items", "keys", "values", "get", "setdefault", "update",
@@ -5475,8 +4982,8 @@ class GenericTaskEnvironment:
                 base, attr = m_attr.group(1), m_attr.group(2)
                 if attr.startswith("__") or attr in common_attrs or base in visible_module_aliases:
                     continue
-                # Skip assignment/definition of a new attribute; warn for reads
-                # and calls of guessed attributes.
+
+
                 after = added_text[m_attr.end():m_attr.end() + 8]
                 if re.match(r"\s*=(?!=)", after):
                     continue
@@ -5523,8 +5030,8 @@ class GenericTaskEnvironment:
                 kw_hits = [kw for kw in kw_hits if kw not in {"self", "cls"}]
                 if not kw_hits:
                     continue
-                # Warn only for calls with multiple positional arguments; a
-                # one-argument call may simply not need the keyword.
+
+
                 if args_text.count(",") >= 1:
                     keyword_style_warnings.append(
                         f"`{fname}(...)` added without keyword(s) seen in source: "
@@ -5562,10 +5069,7 @@ class GenericTaskEnvironment:
                     "issue/source context involves wrapper/decorator/partial behavior; added code unwraps `.func` into the original variable, which may drop wrapper/partial arguments or attributes rather than preserving them"
                 )
 
-        # Lightweight check for the common UnboundLocalError pattern visible in
-        # the issue: a variable assigned only inside a deeper branch and then
-        # read later after dedenting out of that branch.  This is a warning, not
-        # a forced decision.
+
         issue = str(getattr(self, "_question", {}).get("question", "") or "")
         unbound_vars = set()
         for pat in [
@@ -5624,22 +5128,13 @@ class GenericTaskEnvironment:
         return " Post-edit source consistency note: " + "; ".join(notes[:3]) + "."
 
     def _handle_edit_file(self, args: Dict, traj: "Trajectory") -> str:
-        """edit_file: Supervisor 描述变更 (instruction), M_exec 生成精确 old/new 并 apply.
 
-        分离原则: Supervisor (π_θ + LoRA) 做 routing/orchestration, M_exec (冻结 base)
-        做 code syntax generation.
-
-        Args:
-          path: 文件路径
-          instruction: 自然语言描述要修改什么
-            (e.g. "在 except HTTPError 后加上 TooManyRedirects 分支")
-        """
         path = args.get("path", "")
         instruction = args.get("instruction", "").strip()
         if not path:
             return "[edit_file] [ERROR] `path` is required."
         if not instruction:
-            # Backward-compat: if Supervisor still sends old-style old/new, handle gracefully
+
             legacy_old = args.get("old_content", "")
             legacy_new = args.get("new_content", "")
             if legacy_old or legacy_new:
@@ -5650,13 +5145,13 @@ class GenericTaskEnvironment:
                 )
             return "[edit_file] [ERROR] `instruction` is required (describe the change in natural language)."
 
-        # 阻止编辑测试文件
+
         if self._task_type == "code_generation":
             path_lower = path.lower()
             if '/tests/' in path_lower or '/test_' in path_lower or path_lower.startswith('tests/'):
                 return f"[edit_file] [ERROR] Cannot edit test files. Only edit source code files."
 
-        # v5: 真实仓库编辑
+
         if self._repo_path:
             clean = path.strip()
             full_path = self._resolve_repo_path(clean)
@@ -5668,7 +5163,7 @@ class GenericTaskEnvironment:
             except Exception as e:
                 return f"[edit_file] [ERROR] Cannot read '{path}': {e}"
 
-            # M_exec 生成 old/new
+
             edit_context = self._select_edit_context(path, instruction, file_content, traj)
             extra_context = self._recent_view_context(path, traj)
             literal_edit = False
@@ -5711,19 +5206,19 @@ class GenericTaskEnvironment:
                     f"[edit_file] [ERROR] M_exec returned empty old_content for: {instruction[:200]}\n"
                     f"No file content was modified."
                 )
-            # v5.3: whitespace-tolerant fallback (old_content 的 indent/whitespace 和文件稍差也能匹配)
+
             def _find_effective_old(candidate: str) -> str:
                 effective = candidate
                 if candidate in file_content:
                     return effective
-                # 尝试 normalize whitespace (收缩 multi-spaces, strip line trailing ws)
+
                 def _norm_ws(s: str) -> str:
                     return "\n".join(" ".join(line.split()) for line in s.split("\n"))
                 file_normalized = _norm_ws(file_content)
                 old_normalized = _norm_ws(candidate)
                 if old_normalized in file_normalized:
-                    # 找到 normalized 版本, 再回溯找原文对应区间
-                    # 粗略近似: 按行匹配
+
+
                     file_lines = file_content.split("\n")
                     old_lines_stripped = [" ".join(l.split()) for l in candidate.split("\n") if l.strip()]
                     if old_lines_stripped:
@@ -5734,12 +5229,8 @@ class GenericTaskEnvironment:
                                 effective = window
                                 break
                 if effective not in file_content:
-                    # Last-resort high-confidence fuzzy line-window match.  This
-                    # is still only applying the supervisor-requested edit to
-                    # current source; it handles harmless executor drift such as
-                    # one stale context line or whitespace/comment mismatch.  To
-                    # avoid wrong-location edits, require a high ratio and a
-                    # clear margin over the second-best window.
+
+
                     try:
                         import difflib as _difflib
                         file_lines = file_content.split("\n")
@@ -5773,9 +5264,8 @@ class GenericTaskEnvironment:
 
             effective_old = _find_effective_old(old_content)
             if not effective_old:
-                # One strict retry when the executor selected text that is not
-                # actually in the file. This improves edit-tool reliability
-                # without changing the agent's chosen path or requested fix.
+
+
                 try:
                     old_content, new_content = self._m_exec_generate_edit(
                         path=path,
@@ -5809,7 +5299,7 @@ class GenericTaskEnvironment:
                 if literal_edit else
                 "Python syntax check passed for this file"
             )
-            # Linter gate
+
             if path.endswith('.py'):
                 baseline_syntax = self._python_syntax_error(file_content, path)
                 new_syntax = self._python_syntax_error(new_file_content, path)
@@ -5825,10 +5315,8 @@ class GenericTaskEnvironment:
                     attempted_excerpt = self._format_numbered_excerpt_from_content(
                         new_file_content, e.lineno or 1, radius=5
                     )
-                    # One syntax-recovery retry inside the edit tool.  This is
-                    # still the same supervisor-requested edit; it only improves
-                    # the executor's code-generation quality and never uses
-                    # tests/gold/hidden feedback.
+
+
                     retry_error = ""
                     try:
                         retry_old, retry_new = self._m_exec_generate_edit(
@@ -5882,7 +5370,7 @@ class GenericTaskEnvironment:
             with open(full_path, 'w') as f:
                 f.write(new_file_content)
         else:
-            # Fallback: in-memory workspace (same M_exec separation)
+
             if path not in self._code_workspace:
                 return f"[edit_file] [ERROR] File '{path}' not found."
             file_content = self._code_workspace[path]
@@ -5989,7 +5477,7 @@ class GenericTaskEnvironment:
             self._code_workspace[path] = new_file_content
             new_file_content = self._code_workspace[path]
 
-        # 显示编辑后的代码上下文（±5 行）
+
         all_lines = new_file_content.split('\n')
         chars_before = new_file_content[:edit_pos].count('\n')
         edit_lines = new_content.count('\n') + 1
@@ -6083,15 +5571,12 @@ class GenericTaskEnvironment:
         )
 
     def _generate_workspace_diff(self) -> str:
-        """Generate diff — uses real `git diff` when on a repo, otherwise difflib.
 
-        Caches the result because evaluate_patch() resets the repo.
-        """
-        # v5: 真实仓库用 git diff（完美兼容 git apply）
+
         if self._repo_path:
             import subprocess
             try:
-                # 排除测试文件的 diff（模型不应修改测试）
+
                 result = subprocess.run(
                     ["git", "diff", "--", ".", ":(exclude)tests/", ":(exclude)*/tests/",
                      ":(exclude)test_*", ":(exclude)*/test_*"],
@@ -6107,7 +5592,7 @@ class GenericTaskEnvironment:
                 logger.warning(f"[SWE] git diff failed: {e}")
                 return self._cached_diff or ""
 
-        # Fallback: difflib for in-memory workspace
+
         import difflib
         if not self._code_workspace_original:
             return ""
@@ -6129,11 +5614,11 @@ class GenericTaskEnvironment:
         return "\n".join(diff_parts) if diff_parts else ""
 
     def _handle_run_tests(self, args: Dict) -> str:
-        """run_tests: 在真实 repo 环境中运行测试（SWE-bench 官方方式）。"""
+
         test_cmd = args.get("test_cmd", "pytest")
         import subprocess
 
-        # v5: 优先在真实仓库的 conda env 中运行
+
         instance_id = self._extra.get("instance_id", "")
         if instance_id:
             result = self._run_tests_in_swe_env(test_cmd, instance_id)
@@ -6143,7 +5628,7 @@ class GenericTaskEnvironment:
         if not self._code_workspace and not self._repo_path:
             return "[run_tests] No code workspace loaded for this task."
 
-        # Fallback: 临时目录
+
         import tempfile
         try:
             cwd = self._repo_path if self._repo_path else None
@@ -6158,7 +5643,7 @@ class GenericTaskEnvironment:
                 test_cmd, shell=True, capture_output=True, text=True,
                 timeout=60, cwd=cwd,
             )
-            # v5.3: better balance (2K stdout + 1K stderr) + explicit clip indicator
+
             stdout_full = result.stdout.strip()
             stderr_full = result.stderr.strip()
             stdout = stdout_full[-2000:]
@@ -6177,7 +5662,7 @@ class GenericTaskEnvironment:
             return f"[run_tests] Error: {e}"
 
     def _run_tests_in_swe_env(self, test_cmd: str, instance_id: str):
-        """在 SWE-bench conda env 中运行测试。返回 None 表示环境不可用。"""
+
         import subprocess
         try:
             from training.swe_bench_eval import (
@@ -6196,36 +5681,27 @@ class GenericTaskEnvironment:
             if not env_py or not repo_path.exists():
                 return None
 
-            # Bug fix: 使用 episode worktree (self._repo_path) 而非共享 base repo
+
             test_cwd = str(self._repo_path) if self._repo_path else str(repo_path)
 
-            # v5: 如果用真实仓库模式，文件已在磁盘上，不需要重新 checkout
+
             if not self._repo_path:
                 base_commit = verified["base_commit"]
                 subprocess.run(["git", "checkout", base_commit, "-q"], cwd=test_cwd, capture_output=True, timeout=10)
                 subprocess.run(["git", "checkout", ".", "-q"], cwd=test_cwd, capture_output=True, timeout=10)
-                # Write modified files from in-memory workspace
+
                 for path, content in self._code_workspace.items():
                     full_path = repo_path / path
                     if full_path.exists():
                         full_path.write_text(content)
 
-            # IMPORTANT isolation rule:
-            # Do NOT apply the SWE-bench `test_patch` during an agent episode.
-            # That patch is part of held-out evaluation and must never become
-            # visible to the policy through run_tests output.
-            # Official scoring may use hidden/official tests after the episode,
-            # but tools available to the agent can only run tests already present
-            # in the checked-out repository or tests explicitly requested by a
-            # user-provided public command.
 
-            # For Django, use the runtests.py runner
             spec = _swe_bench_specs.get(repo, {}).get(version, {})
             real_test_cmd = spec.get("test_cmd", "pytest -rA")
             if isinstance(real_test_cmd, list):
                 real_test_cmd = real_test_cmd[-1]
 
-            # Parse test_cmd to extract test module
+
             test_arg = test_cmd.strip()
             if "runtests.py" in real_test_cmd:
                 cmd = [env_py, "./tests/runtests.py", "--settings=test_sqlite", "--parallel", "1", test_arg]
@@ -6251,7 +5727,7 @@ class GenericTaskEnvironment:
             logger.debug(f"[run_tests] SWE env error: {e}")
             return None
         finally:
-            # Reset repo only if NOT in real-repo mode (edits need to persist)
+
             if not self._repo_path:
                 try:
                     subprocess.run(["git", "checkout", ".", "-q"], cwd=str(repo_path), capture_output=True, timeout=10)
@@ -6259,10 +5735,9 @@ class GenericTaskEnvironment:
                 except Exception:
                     pass
 
-    # ── 环境工具 handlers (RAGEN) ──
 
     def _handle_act(self, args: Dict) -> str:
-        """act: RAGEN ALFWorld environment step"""
+
         action_text = args.get("action", "")
         if not self._ragen_adapter:
             return "[act] [ERROR] No interactive environment loaded."
@@ -6276,7 +5751,7 @@ class GenericTaskEnvironment:
                 self._env_done = True
                 self._env_reward = 0.0
                 return f"[act] [FAILED] Episode ended without success.\n{obs}"
-            # 检测无效动作
+
             if "Nothing happens." in obs:
                 return f"[act] [INVALID] Action '{action_text}' had no effect. Choose from the admissible actions.\n{obs}"
             return f"[act] [OK]\n{obs}"
@@ -6285,26 +5760,25 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _clean_webshop_obs(obs: str) -> str:
-        """清理 WebShop observation，去掉重复的 Instruction 前缀。"""
-        # WebShop text mode 返回 "Instruction: [SEP] ... [SEP] Back to Search [SEP] ..."
-        # 只保留 "Back to Search" 之后的产品/页面内容
+
+
         if "[SEP] Back to Search" in obs:
             obs = re.sub(r"^.*?\[SEP\]\s*Back to Search\s*\[SEP\]\s*", "Back to Search | ", obs, flags=re.DOTALL)
         elif "Instruction:" in obs:
             obs = re.sub(r"^Instruction:.*?\[SEP\]\s*", "", obs, flags=re.DOTALL)
-        # 用 | 替代 [SEP] 更简洁
+
         obs = obs.replace("[SEP]", "|")
         return obs
 
     def _handle_search_product(self, args: Dict) -> str:
-        """search_product: RAGEN WebShop search"""
+
         query = args.get("query", "")
         if not self._ragen_adapter:
             return "[search_product] [ERROR] WebShop environment not available."
         try:
             obs, reward, done, info = self._ragen_adapter.step(f"search[{query}]")
             obs = self._clean_webshop_obs(obs)
-            self._last_webshop_obs = obs  # 为 click 的 no-op 检测保存当前页面
+            self._last_webshop_obs = obs  
 
             if done and reward > 0:
                 self._env_done = True
@@ -6319,7 +5793,7 @@ class GenericTaskEnvironment:
             return f"[search_product] [ERROR] {e}"
 
     def _handle_click(self, args: Dict) -> str:
-        """click: RAGEN WebShop click"""
+
         element = args.get("element", "")
         if not self._ragen_adapter:
             return "[click] [ERROR] WebShop environment not available."
@@ -6338,7 +5812,7 @@ class GenericTaskEnvironment:
                 self._env_reward = 0.0
                 return f"[click] [DONE] Episode ended without purchase.\n{obs}"
 
-            # 检测 no-op：如果 obs 和上次完全一样，说明 element 不在当前页面上
+
             if pre_click_obs and obs == pre_click_obs:
                 return (
                     f"[click] [FAILED] Element '{element}' not found on current page. "
@@ -6351,10 +5825,9 @@ class GenericTaskEnvironment:
         except Exception as e:
             return f"[click] [ERROR] {e}"
 
-    # ── Legacy handler ──
 
     def _handle_skill_invoke(self, args: Dict) -> str:
-        """skill_invoke action — return the selected learned strategy."""
+
         skill_id = args.get("skill_id")
         skill = self.workspace.get_by_id(skill_id) if self.workspace else None
         if skill:
@@ -6367,21 +5840,17 @@ class GenericTaskEnvironment:
             )
         return f"[ERROR] Skill {skill_id} not found. Use other tools directly."
 
-    # ──────────────────────────────────────────────
-    # Episode termination
-    # ──────────────────────────────────────────────
 
     def _force_terminate(
         self,
         traj: Trajectory,
     ) -> Tuple[float, bool, Dict]:
-        """超过 max_episode_steps，强制终止。"""
+
         answer = traj.final_answer or ""
         if answer:
             answer = self._clean_accept_answer(answer, traj)
 
-        # code_generation: 用 _code_workspace 的实际变更生成 diff 作为 answer
-        # （而非模型的文本描述 — reward 需要和 gold diff 对比）
+
         if self._task_type == "code_generation":
             workspace_diff = self._generate_workspace_diff()
             if workspace_diff:
@@ -6393,9 +5862,9 @@ class GenericTaskEnvironment:
                     f"diff_len={len(workspace_diff)}"
                 )
 
-        # interactive_agent: 优先用环境 reward
+
         if self._task_type in ("webshop", "alfworld", "interactive_agent") and self._env_done and self._env_reward > 0:
-            # 使用环境返回的实际 reward（WebShop: graded 0-1, ALFWorld: binary 0/1）
+
             r_answer = min(float(self._env_reward), 1.0)
             if str(self.reward_mode).lower() in {"outcome_only", "paper", "outcome"}:
                 r_process = 0.0
@@ -6429,21 +5898,11 @@ class GenericTaskEnvironment:
             "truncated": True,
         }
 
-    # ──────────────────────────────────────────────
-    # Auto-inject skill (kept for backward compat, not used in main loop)
-    # ──────────────────────────────────────────────
 
     def _auto_inject_best_skill(
         self, question: Dict, messages: List[Dict], traj: "Trajectory"
     ) -> List[Dict]:
-        """
-        自动注入策略 — 优先使用 XSkill Living Document，fallback 到个体 skill。
 
-        注入优先级：
-        1. Per-type Living Document（XSkill 风格合并文档，质量最高）
-        2. 算法 top-1 skill（两阶段检索）
-        3. General skill（兜底）
-        """
         task_type = self._task_type
         skill_id_for_tracking = "general"
 
@@ -6492,7 +5951,7 @@ class GenericTaskEnvironment:
                 f"{skill.plan}\n"
             )
 
-        # Record as Turn 0 for tracking
+
         turn = Turn(
             supervisor_input="",
             supervisor_output=f"skill_invoke({skill_id_for_tracking})",
@@ -6505,12 +5964,9 @@ class GenericTaskEnvironment:
 
         return messages
 
-    # ──────────────────────────────────────────────────────
-    # Context / utility methods
-    # ──────────────────────────────────────────────────────
 
     def _get_injected_tip(self) -> str:
-        """获取当前注入的 skill tip 文本（供 M_exec 子调用使用）。"""
+
         if hasattr(self, '_injected_skill_ids') and self._injected_skill_ids and self.workspace:
             tips = []
             for sid in self._injected_skill_ids:
@@ -6522,12 +5978,12 @@ class GenericTaskEnvironment:
         return ""
 
     def _format_context(self) -> str:
-        """格式化 M_exec 上下文：任务描述 + 辅助文档 + 注入的 skill tip。"""
+
         parts = []
         q_text = str(self._question.get("question", ""))
         if q_text:
             parts.append(f"Task ({self._task_type}): {q_text}")
-        # 传递 skill tip 给 M_exec
+
         tip = self._get_injected_tip()
         if tip:
             parts.append(tip)
@@ -6541,7 +5997,7 @@ class GenericTaskEnvironment:
         return "\n\n".join(parts)
 
     def _clean_accept_answer(self, answer: str, traj: Trajectory) -> str:
-        """清洗答案中的工具输出噪音。"""
+
         if not answer.strip():
             return answer
 
@@ -6580,7 +6036,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _extract_code_from_trajectory(traj: Trajectory) -> Optional[str]:
-        """从轨迹的 observation 中提取最完整的 Python 代码块。"""
+
         best_code = ""
         for turn in reversed(traj.turns):
             obs = turn.observation or ""
@@ -6601,7 +6057,7 @@ class GenericTaskEnvironment:
         raw_instruction: str,
         traj: Trajectory,
     ) -> str:
-        """用 skill 信息增强 instruction（发给 M_exec）。"""
+
         if not skill_id or not self.workspace:
             return raw_instruction
 
@@ -6617,12 +6073,9 @@ class GenericTaskEnvironment:
             enhanced += f"\n(Constraint: {skill.constraint})"
         return enhanced
 
-    # ──────────────────────────────────────────────────────
-    # 工具执行（确定性环境能力）
-    # ──────────────────────────────────────────────────────
 
     def _execute_python(self, code: str, timeout: int = 10) -> str:
-        """执行 Python 代码并返回输出。code_generation 任务使用项目 conda 环境。"""
+
         if not code.strip():
             return "[ERROR] Empty code"
 
@@ -6637,8 +6090,8 @@ class GenericTaskEnvironment:
                 f.write(code)
                 tmp_path = f.name
 
-            # v5: code_generation 使用项目 conda env（有项目依赖）；否则用训练 venv (有 sympy/numpy/scipy)
-            python_cmd = sys.executable  # 默认用 .venv/bin/python (训练自身环境, 包含 sympy)
+
+            python_cmd = sys.executable  
             cwd = None
             if self._repo_path and self._task_type == "code_generation":
                 cwd = self._repo_path
@@ -6690,7 +6143,7 @@ class GenericTaskEnvironment:
 
     def _build_code_gen_prompt(self, tool_type: str, instruction: str,
                                traj: "Trajectory") -> str:
-        """构建让 M_exec 生成可执行代码的 prompt。"""
+
         if tool_type == "test_code":
             test_info = ""
             if self._extra:
@@ -6736,7 +6189,7 @@ class GenericTaskEnvironment:
                 f"Write ONLY the Python function. Output code inside ``` block."
             )
 
-        else:  # python_execute
+        else:  
             prev_error = ""
             for h in reversed(self._history[-3:]):
                 obs = h.get("observation", "")
@@ -6768,7 +6221,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _auto_fix_code(code: str) -> str:
-        """自动修复 M_exec 输出代码中的常见问题。"""
+
         import ast as _ast
 
         lines = code.split('\n')
@@ -6813,7 +6266,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _sanitize_code(code: str) -> str:
-        """清洗 M_exec 输出代码中的 Unicode 特殊字符。"""
+
         code = code.replace('\u2011', '-')
         code = code.replace('\u2010', '-')
         code = code.replace('\u2012', '-')
@@ -6835,7 +6288,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _extract_code_block(text: str) -> str:
-        """从 M_exec 输出中提取代码块，并清洗 Unicode 问题。"""
+
         code_block = re.search(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
         if code_block:
             code = code_block.group(1).strip()
@@ -6855,7 +6308,7 @@ class GenericTaskEnvironment:
         return GenericTaskEnvironment._auto_fix_code(code)
 
     def _test_code(self, code: str, test_code: str) -> str:
-        """测试 Python 函数，返回详细反馈。"""
+
         if not code.strip():
             return "[ERROR] Empty code"
 
@@ -6884,7 +6337,7 @@ class GenericTaskEnvironment:
         return self._execute_python(full_code, timeout=15)
 
     def _run_tests_with_detail(self, code: str, test_cases: list) -> str:
-        """逐条执行测试，返回详细反馈。"""
+
         import subprocess
         import tempfile
         import os
@@ -6913,7 +6366,7 @@ class GenericTaskEnvironment:
                     tmp_path = f.name
 
                 result = subprocess.run(
-                    [sys.executable, tmp_path],  # v7: use venv python (has sympy/numpy)
+                    [sys.executable, tmp_path],  
                     capture_output=True, text=True, timeout=10,
                     env={**os.environ, "PYTHONPATH": ""},
                 )
@@ -6956,15 +6409,15 @@ class GenericTaskEnvironment:
 
         return header + "\n" + "\n".join(details)
 
-    # ── Embedding 模型（lazy load，fact_verify + passage_search 共享）──
+
     _embed_model = None
 
     @classmethod
     def _get_embed_model(cls):
-        """Lazy load embedding model（全局共享，线程安全）"""
+
         if cls._embed_model is None:
             try:
-                # 禁用 TensorFlow 避免 Keras 3 兼容问题
+
                 import os
                 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
                 os.environ.setdefault("USE_TF", "0")
@@ -6979,7 +6432,7 @@ class GenericTaskEnvironment:
         return cls._embed_model if cls._embed_model != "FAILED" else None
 
     def _embed_score(self, query: str, passages: list) -> list:
-        """用 embedding 计算 query 和 passages 的相似度"""
+
         model = self._get_embed_model()
         if model is None:
             return self._keyword_score(query, passages)
@@ -6991,7 +6444,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _keyword_score(query: str, passages: list) -> list:
-        """Fallback 关键词匹配"""
+
         query_terms = set(query.lower().split()) - {
             "the", "a", "an", "is", "was", "are", "were", "in", "on",
             "at", "to", "for", "of", "and", "or", "that", "this", "it"
@@ -7003,7 +6456,7 @@ class GenericTaskEnvironment:
         return scores
 
     def _get_passage_texts(self) -> list:
-        """从 context 提取纯文本列表"""
+
         texts = []
         for p in (self._context or []):
             if isinstance(p, dict):
@@ -7013,18 +6466,7 @@ class GenericTaskEnvironment:
         return texts
 
     def _verify_fact(self, claim: str) -> str:
-        """验证事实声明。
 
-        v5.3 (2026-04-17): 修复 fact_verify 无法区分 correct/wrong claim 的致命 bug。
-        之前用全句 embedding similarity, 导致 "answer is X" 和 "answer is FAKE_XYZ"
-        confidence 差距仅 3pp — tool 失效。
-
-        新策略: token-level 证据
-          1. 从 claim 提取 distinctive tokens (Named Entities, 数字, 引号)
-          2. 过滤掉 question 里本身就有的 tokens (它们对验证无贡献)
-          3. 检查剩下的"答案性 tokens"是否出现在 top passage
-          4. coverage-based 判定: 80%+ = SUPPORTED, 40-80% = PARTIAL, <40% = NOT_SUPPORTED
-        """
         import re
         if not claim.strip():
             return "[ERROR] Empty claim"
@@ -7039,14 +6481,13 @@ class GenericTaskEnvironment:
         best_passage = passages[best_idx]
         best_score = scores[best_idx]
 
-        # ── Step 1: 提取 claim 的 distinctive tokens ──
-        # capitalized words (named entities), 数字 (年份、数量), 引号 (固定短语)
+
         claim_tokens = re.findall(r'\b[A-Z][\w\'-]+\b|\b\d[\d,.]*\b|"[^"]+"', claim)
 
-        # ── Step 2: 过滤 question 里本身就有的 tokens ──
+
         q_text = str(self._question.get("question", "") if hasattr(self, '_question') else "")
         question_tokens = set(re.findall(r'\b[A-Z][\w\'-]+\b', q_text))
-        # 通用停用 capitalized 词 (句首/常见词)
+
         common_caps = {"The", "A", "An", "In", "On", "At", "Of", "To", "For", "By",
                        "And", "Or", "But", "Not", "What", "Who", "Where", "When",
                        "Which", "How", "Why", "Is", "Are", "Was", "Were", "Be",
@@ -7057,15 +6498,13 @@ class GenericTaskEnvironment:
         distinctive = [t for t in claim_tokens if t.strip('"') not in question_tokens]
 
         if not distinctive:
-            # Claim 没有额外信息 → 降级到 embedding 但更保守
+
             evidence = f"[Evidence] (sim={best_score:.2f})\n{best_passage[:400]}"
             if best_score >= 0.55:
                 return f"[PARTIAL] (no_distinctive_tokens, sim={best_score:.0%})\n{evidence}"
             return f"[NOT_SUPPORTED] (no_distinctive_tokens, sim={best_score:.0%})\n{evidence}"
 
-        # ── Step 3: 检查 distinctive tokens 在 ALL passages ──
-        # 对每个 passage 算 coverage, 取最高者作为证据
-        # (embedding top-1 可能不是含答案的 passage)
+
         best_coverage = 0.0
         best_evidence_idx = best_idx
         best_found: List[str] = []
@@ -7094,7 +6533,7 @@ class GenericTaskEnvironment:
             f"{evidence_passage[:400]}"
         )
 
-        # ── Step 4: coverage-based 判定 ──
+
         if best_coverage >= 0.8:
             return (
                 f"[SUPPORTED] claim tokens found in passage ({len(best_found)}/{len(distinctive)}): {best_found}\n"
@@ -7112,12 +6551,12 @@ class GenericTaskEnvironment:
             )
 
     def _search_passages(self, query: str) -> str:
-        """BM25 + Dense 混合检索。无 context 时自动使用外部知识库。"""
+
         if not query.strip():
             return "[ERROR] Empty query"
 
         if not self._context:
-            # 无本地 context → 使用外部知识库（MedRAG 教科书等）
+
             return self._search_external_corpus(query)
 
         passages = self._get_passage_texts()
@@ -7142,7 +6581,7 @@ class GenericTaskEnvironment:
 
         previously_seen = set(self._retrieved_passage_ids)
         results = []
-        # v5.3: 限 top-3 (之前 4) + 提高 threshold (0.05→0.15) 过滤噪声
+
         for rank, idx in enumerate(sorted_idx[:3], 1):
             if hybrid_scores[idx] < 0.15:
                 continue
@@ -7151,14 +6590,14 @@ class GenericTaskEnvironment:
             match_info = f" keywords={matched_terms}" if matched_terms else ""
             title = self._get_passage_title(idx)
 
-            # v5.3: 提取含 keyword 句子 ± 1 句上下文（抓 co-reference），限 500 chars
+
             if matched_terms:
                 sents = re.split(r'(?<=[.!?])\s+', full_text)
                 keyword_idx = set()
                 for i, s in enumerate(sents):
                     if any(t.lower() in s.lower() for t in matched_terms):
                         keyword_idx.add(i)
-                # 扩 ± 1 相邻句（捕获 "she" "he" "it" 等指代）
+
                 expanded = set()
                 for i in keyword_idx:
                     expanded.add(i)
@@ -7183,7 +6622,7 @@ class GenericTaskEnvironment:
         if not results:
             return f"[search] [NO_MATCH] No relevant passages found for: {query}. Try different keywords or provide your answer based on existing information."
 
-        # 检测是否所有结果都已在之前的搜索中返回过
+
         new_passage_ids = [idx for idx in sorted_idx[:4] if idx not in previously_seen]
         prefix = "[search] [OK]"
         if not new_passage_ids and previously_seen:
@@ -7193,7 +6632,7 @@ class GenericTaskEnvironment:
 
     @staticmethod
     def _extract_query_terms(query: str) -> list:
-        """提取 query 中的实质性关键词（去停用词）"""
+
         stop_words = {
             "the", "a", "an", "is", "are", "was", "were", "be", "been",
             "of", "in", "to", "for", "and", "or", "but", "on", "at",
@@ -7204,7 +6643,6 @@ class GenericTaskEnvironment:
         tokens = re.findall(r'\b\w+\b', query)
         return [t for t in tokens if t.lower() not in stop_words and len(t) > 1]
 
-    # ── 外部知识库检索（MedRAG 教科书 125K chunks，倒排索引 BM25）──
 
     _external_corpus: list = []
     _external_index: dict = {}
@@ -7213,14 +6651,14 @@ class GenericTaskEnvironment:
 
     @classmethod
     def _load_external_corpus(cls):
-        """Lazy load: 首次调用时加载预建 BM25 倒排索引 + corpus 文本（线程安全）。"""
+
         if cls._external_index:
             return
         import threading
         if cls._external_corpus_lock is None:
             cls._external_corpus_lock = threading.Lock()
         with cls._external_corpus_lock:
-            # 双重检查
+
             if cls._external_index:
                 return
             import pickle
@@ -7233,7 +6671,7 @@ class GenericTaskEnvironment:
             t0 = time.time()
             with open(index_path, 'rb') as f:
                 cls._external_index = pickle.load(f)
-            # Load texts
+
             corpus = []
             with open(corpus_path) as f:
                 for line in f:
@@ -7248,7 +6686,7 @@ class GenericTaskEnvironment:
             logger.info(f"[Search] Loaded external corpus: {len(cls._external_corpus)} chunks + index in {time.time()-t0:.1f}s")
 
     def _search_external_corpus(self, query: str) -> str:
-        """BM25 倒排索引检索（~150ms/query over 125K medical textbook chunks）。"""
+
         self._load_external_corpus()
         if not self._external_index:
             return "[NO_CONTEXT] No external knowledge base available"
@@ -7286,7 +6724,7 @@ class GenericTaskEnvironment:
         return "[search] [OK]\n" + "\n\n".join(results)
 
     def _bm25_score(self, query: str, passages: list) -> list:
-        """BM25 评分。"""
+
         import math as _math
 
         query_terms = self._extract_query_terms(query)
@@ -7327,7 +6765,7 @@ class GenericTaskEnvironment:
         return scores
 
     def _get_passage_title(self, idx: int) -> str:
-        """获取段落标题"""
+
         if not self._context or idx >= len(self._context):
             return ""
         p = self._context[idx]
@@ -7338,18 +6776,8 @@ class GenericTaskEnvironment:
         return m.group(1) if m else ""
 
 
-# ──────────────────────────────────────────────────────
-# ReAct 交互方法（WebShop/ALFWorld 专用）
-# 参考 SkillRL env_manager.py 的交互模式
-# ──────────────────────────────────────────────────────
-
-    # NOTE: 以下方法属于 GenericTaskEnvironment 类
-    # 但由于 Python 不允许在类外追加方法，
-    # 需要在类内部定义。下面用 monkey-patch 的方式注入。
-
-
 def _env_flag(name, default=True):
-    """Parse boolean env flags used by local ablation runs."""
+
     import os
     val = os.environ.get(name)
     if val is None:
@@ -7362,8 +6790,8 @@ def _alfworld_input_fixes_enabled():
 
 
 def _alfworld_decision_block_enabled():
-    # Default OFF for skill-only ALFWorld evals.  The old runtime decision
-    # block can still be enabled explicitly with ALFWORLD_DECISION_BLOCK=1.
+
+
     import os
     if "ALFWORLD_DECISION_BLOCK" in os.environ:
         return _env_flag("ALFWORLD_DECISION_BLOCK", True)
@@ -7371,78 +6799,62 @@ def _alfworld_decision_block_enabled():
 
 
 def _alfworld_semantic_guard_enabled():
-    # Default OFF: do not block admissible actions before env.step unless an
-    # ablation explicitly asks for the old guard.
+
+
     return _env_flag("ALFWORLD_SEMANTIC_GUARD", False)
 
 
 def _alfworld_progress_block_enabled():
-    # Default OFF for skill-only evals.  We still keep raw Action -> Result
-    # history, but avoid adding a dynamic visited/unvisited state summary unless
-    # explicitly requested.
+
+
     return _env_flag("ALFWORLD_PROGRESS_BLOCK", False)
 
 
 def _alfworld_skill_trailer_enabled():
-    # WebShop-clean alignment: keep the retrieved static skill prefix, but do
-    # not add a second near-output checklist by default.  The trailer is useful
-    # for diagnostics, yet it is stronger than the current WebShop clean setup.
+
+
     return _env_flag("ALFWORLD_SKILL_TRAILER", False)
 
 
 def _alfworld_skill_apply_block_enabled():
-    # Prompt-only application of the learned ALFWorld skill to the current
-    # admissible-action state.  This is not an output guard: it never blocks or
-    # rewrites actions after generation.  It is the former "decision" knowledge
-    # expressed as model-visible skill context near the final action line.
-    #
-    # Default OFF for auditability: strong skill-application prompts should be
-    # enabled explicitly in eval commands with ALFWORLD_SKILL_APPLY_BLOCK=1, so a
-    # plain "skill-only" run is not accidentally inflated.
+
+
     return _env_flag("ALFWORLD_SKILL_APPLY_BLOCK", False)
 
 
 def _alfworld_strong_guidance_enabled():
-    # Paper-clean default: keep visible task/history summaries, but avoid
-    # state-specific imperative next-action advice such as "NEXT ACTION should
-    # be ...".  Set ALFWORLD_STRONG_GUIDANCE=1 to recover the older diagnostic
-    # wording for ablations.
+
+
     return _env_flag("ALFWORLD_STRONG_GUIDANCE", False)
 
 
 def _alfworld_invalid_action_feedback_enabled():
-    # SkillRL's projection only extracts <action>; it does not check whether the
-    # extracted action is in the admissible list and does not synthesize
-    # state-aware correction text.  Keep our old feedback path opt-in only.
+
+
     return _env_flag("ALFWORLD_INVALID_ACTION_FEEDBACK", False)
 
 
 def _alfworld_loop_guard_enabled():
-    # SkillRL lets the environment feedback stand as-is; no wrapper-generated
-    # repeated-action hint.  Keep old loop guard opt-in only.
+
+
     return _env_flag("ALFWORLD_LOOP_GUARD", False)
 
 
 def _alfworld_canonicalize_action_enabled():
-    # Do not rewrite the model's action before env.step in SkillRL-aligned runs.
-    # This avoids hidden "put -> move" or synonym repairs.  Enable explicitly
-    # with ALFWORLD_CANONICALIZE_ACTION=1 for legacy compatibility.
+
+
     return _env_flag("ALFWORLD_CANONICALIZE_ACTION", False)
 
 
 def _alfworld_env_feedback_enabled():
-    # Clean execution-status feedback.  This may restate whether the previous
-    # action was unavailable or produced no visible state change, and may keep
-    # the last visible current state when the env only says "Nothing happens".
-    # It must not recommend/rank a next action.
+
+
     return _env_flag("ALFWORLD_ENV_FEEDBACK", True)
 
 
 def _alfworld_history_max():
-    # SkillRL/RAGEN do not keep dumping the entire trajectory into every prompt
-    # (SkillRL uses a configured history_length; RAGEN uses a context window).
-    # Keep the recent interaction window compact so current observation and
-    # admissible actions dominate the prompt.  <=0 means no history.
+
+
     import os
     try:
         return int(os.environ.get("ALFWORLD_HISTORY_MAX", "6"))
@@ -7451,8 +6863,8 @@ def _alfworld_history_max():
 
 
 def _alfworld_history_obs_chars():
-    # RAGEN truncates historical observations (about 200 chars).  We keep a
-    # little more because our Action->Result format carries execution feedback.
+
+
     import os
     try:
         return int(os.environ.get("ALFWORLD_HISTORY_OBS_CHARS", "360"))
@@ -7461,35 +6873,26 @@ def _alfworld_history_obs_chars():
 
 
 def _alfworld_visit_feedback_enabled():
-    # Extra repeated-location hints are experimental.  They are neutral (no
-    # target parsing), but quick probes showed they can distract the policy on
-    # easy food/place tasks, so keep them opt-in.
+
+
     return _env_flag("ALFWORLD_VISIT_FEEDBACK", False)
 
 
 def _alfworld_invalid_keep_state_enabled():
-    # Visible execution feedback: when TextWorld says "Nothing happens",
-    # the state did not change. Re-show the last model-visible observation so
-    # the next prompt still contains the current room/objects instead of only
-    # a bare no-op message. This uses only model-visible state.
-    # Default ON for clean current-state continuity: if an action is invalid or
-    # has no visible effect, the current visible state did not change.  Re-show
-    # that already-visible state without recommending any future action.
+
+
     return _env_flag("ALFWORLD_INVALID_KEEP_STATE", True)
 
 
 def _alfworld_task_brief_enabled():
-    # Static parse of the visible task instruction (target/state/destination).
-    # This is not hidden-state feedback and does not inspect the game file.
+
+
     return _env_flag("ALFWORLD_TASK_BRIEF", True)
 
 
 def _alfworld_visible_memory_enabled():
-    # WebShop-clean alignment: default ON, but the block is now state-only:
-    # current observation, admissible-action surface text, and prior history.
-    # It does not rank candidates, recommend an action, inspect hidden state, or
-    # block/repair outputs after generation.  Set ALFWORLD_VISIBLE_MEMORY=0 for
-    # the stricter raw-prompt ablation.
+
+
     return _env_flag("ALFWORLD_VISIBLE_MEMORY", True)
 
 
@@ -7505,14 +6908,8 @@ _ALFWORLD_SKILL_TRAILER = """Static checklist before choosing (generic, no hidde
 - Treat exact class names strictly: pan≠pot/kettle/spatula; peppershaker≠saltshaker; pencil≠pen; soapbar≠soapbottle; cup≠mug/bowl; knife≠butterknife."""
 
 
-
 def _build_alfworld_task_brief(task_description: str) -> str:
-    """State-only facts parsed from the visible task instruction.
 
-    WebShop-clean alignment: this may expose visible target/destination/state
-    words, analogous to WebShop's visible attribute summary, but it must not
-    describe a workflow, source priority, hidden game state, or next action.
-    """
     if not _alfworld_task_brief_enabled():
         return ""
     parsed = _parse_alfworld_task(task_description or "")
@@ -7538,13 +6935,7 @@ def _build_alfworld_task_brief(task_description: str) -> str:
 
 
 def _soften_alfworld_visible_memory_lines(lines):
-    """Remove imperative next-action wording from the visible-memory block.
 
-    The returned block may still expose clean, visible facts (task phase,
-    held-object estimate, checked locations, and candidate action strings that
-    already appear in the admissible list), but it should not read like a
-    controller telling the policy exactly what to do next.
-    """
     if _alfworld_strong_guidance_enabled():
         return lines
     softened = []
@@ -7553,7 +6944,7 @@ def _soften_alfworld_visible_memory_lines(lines):
         low = s.lower()
         if "next action should" in low or "recommended next" in low:
             continue
-        # Neutralise state/action candidate lists.
+
         replacements = [
             ("- listed ways to put down the non-target object:", "- visible put-down actions for the non-target held object:"),
             ("- holding next count target; exact same-destination move currently listed:", "- visible same-destination move actions for the next count target:"),
@@ -7577,7 +6968,7 @@ def _soften_alfworld_visible_memory_lines(lines):
             if s.startswith(old):
                 s = new + s[len(old):]
                 break
-        # Soften imperative guard language without deleting the visible facts.
+
         s = s.replace("do NOT choose", "avoid")
         s = s.replace("Do NOT choose", "Avoid")
         s = s.replace("do NOT output", "avoid outputting")
@@ -7601,14 +6992,7 @@ def _soften_alfworld_visible_memory_lines(lines):
 
 
 def _build_alfworld_visible_memory(env_self, avail_actions) -> str:
-    """WebShop-clean ALFWorld visible-state feedback.
 
-    Uses only model-visible inputs: task text already shown in the prompt,
-    current observation, current admissible actions, and prior Action→Result
-    history.  It intentionally avoids source-priority ranking, exact next-action
-    advice, evaluator-only metadata, reward signals, and post-generation
-    action blocking/rewriting.
-    """
     if not _alfworld_visible_memory_enabled():
         return ""
 
@@ -7626,12 +7010,12 @@ def _build_alfworld_visible_memory(env_self, avail_actions) -> str:
         "State summary only from the visible task/observation/history/admissible actions; no hidden state, reward signal, candidate ranking, or action recommendation.",
     ]
 
-    # Current observation: compact restatement, not a plan.
+
     obs_one = " ".join(current_obs.split())
     if obs_one:
         lines.append("- current observation excerpt: " + obs_one[:260] + ("..." if len(obs_one) > 260 else ""))
 
-    # Current admissible-action surface form summaries.
+
     nav_targets = [a[6:].strip() for a in avail if a.lower().startswith("go to ")]
     open_targets = [a[5:].strip() for a in avail if a.lower().startswith("open ")]
     take_actions = [a for a in avail if a.lower().startswith("take ")]
@@ -7652,15 +7036,12 @@ def _build_alfworld_visible_memory(env_self, avail_actions) -> str:
     if open_targets:
         lines.append("- current visible open targets: " + ", ".join(open_targets[:12]) + (" ..." if len(open_targets) > 12 else "."))
 
-    # Inventory/held-object estimate from current action affordances.  ALFWorld
-    # exposes move/state commands only when holding the corresponding object.
+
     held = _extract_held_objects_from_actions(avail, target_class=target) if avail else []
     if held:
         lines.append("- held-object estimate from current admissible move/state actions: " + ", ".join(held[:6]) + ".")
 
-    # Target/destination mentions in currently visible admissible strings.  This
-    # is analogous to WebShop listing visible product rows/options: a compact
-    # restatement of text already shown, not a recommendation or ranking.
+
     if target:
         target_mentions = []
         for a in avail:
@@ -7701,8 +7082,7 @@ def _build_alfworld_visible_memory(env_self, avail_actions) -> str:
         if lamp_mentions:
             lines.append("- current admissible strings mentioning desklamp/use actions: " + " | ".join(lamp_mentions[:8]) + (" ..." if len(lamp_mentions) > 8 else "."))
 
-    # History summaries: recent actions, placed records, state transforms, and
-    # visited locations.  All are reconstructed from prior visible observations.
+
     if react_history:
         recent_actions = [str(a) for _obs, a in react_history[-8:]]
         lines.append("- recent action history: " + " | ".join(recent_actions) + ".")
@@ -7809,11 +7189,8 @@ _WEBSHOP_COLOR_WORDS = {
     "pink", "purple", "red", "white", "yellow", "navy", "silver", "gold",
 }
 _WEBSHOP_QUERY_ATTR_PHRASES = (
-    # Common visible modifiers in WebShop goals.  These are not hidden target
-    # labels; they are instruction words that usually belong in result/product
-    # filtering rather than in the first retrieval query.  Keeping first
-    # searches close to the core noun mirrors how the upstream WebShop goals
-    # are written and avoids empty/bad Lucene result pages.
+
+
     "100 percent", "100 vegan", "soy free", "plant based", "dairy free",
     "non gmo", "gluten free", "artificial flavors", "slim fit", "loose fit",
     "classic fit", "straight leg", "machine washable", "machine wash",
@@ -7838,26 +7215,20 @@ def _webshop_price_limit(task: str):
 
 
 def _webshop_task_attr_value(task: str, label: str) -> str:
-    """Extract visible task attribute value after patterns like `color: blue137`.
 
-    This reads only the instruction text shown to the agent.  It is especially
-    important for WebShop synthetic goals, where values such as `r.brown2070`,
-    `b5-purple`, or decimal sizes like `11.5` are exact option tokens rather
-    than broad approximations.
-    """
     import re as _re
     raw = str(task or "")
     lab = _re.escape(label)
     labels = r"(?:color|size|fit type|flavor name|flavor|scent|style|pattern|count|number|dimensions?|width|height|item shape|shape)"
-    # Stop at the next labeled attribute or at the price clause/end, but do not
-    # stop on decimal points inside option values such as `11.5`.
+
+
     pat = rf"\b{lab}\s*:\s*(.*?)(?=,\s*(?:and\s+)?{labels}\b\s*:?|,?\s*and\s+price\s+lower\s+than\b|$)"
     m = _re.search(pat, raw, flags=_re.IGNORECASE)
     if not m:
         return ""
     value = m.group(1).strip(" ,.;")
-    # Keep leading `with` when it is part of the actual option value, e.g.
-    # `size: with shelf`.  Only a stray leading `and` is syntactic noise.
+
+
     value = _re.sub(r"^\s*and\s+", "", value, flags=_re.IGNORECASE).strip()
     return value
 
@@ -7872,14 +7243,7 @@ def _webshop_has_phrase(text: str, phrase: str) -> bool:
 
 
 def _webshop_compact_query(task: str) -> str:
-    """Visible-task-only compact query hint; does not inspect hidden goal data.
 
-    Build a search hint from the visible instruction.  The first part keeps the
-    core product/category; the second part appends a few exact visible option
-    tokens.  This avoids both extremes: a too-broad query that finds the right
-    category but wrong option, and an over-parsed query that drops exact tokens
-    like `coal grey`, `brown | beige`, or `item shape: round`.
-    """
     import re as _re
     raw = str(task or "").lower()
     price = _webshop_price_limit(raw)
@@ -7891,9 +7255,7 @@ def _webshop_compact_query(task: str) -> str:
     cleaned = _re.sub(r"\bprice\s+lower\s+than\s*\$?\s*[0-9]+(?:\.[0-9]+)?\s*dollars?\b", " ", cleaned)
     cleaned = _re.sub(r"\s+", " ", cleaned).strip(" ,-")
 
-    # Core product/category prefix before option labels.  Remove trailing usage
-    # contexts such as "for dining room, living room" from search, but preserve
-    # category commas such as "women's tops, tees & blouses".
+
     prefix = cleaned.split(" with ")[0]
     prefix = _re.sub(r"\bfor\s+(daily wear|dry clean|tumble dry|living room|dining room|bedroom|office|teen girls|teen boys)\b(?:\s*,\s*\w+(?:\s+\w+)*)*", " ", prefix)
     segs = [seg.strip() for seg in prefix.split(",") if seg.strip()]
@@ -7905,8 +7267,8 @@ def _webshop_compact_query(task: str) -> str:
         elif _re.search(r"\b(men|men's|women|women's|boys|girls|unisex)\b", tail):
             prefix = tail
         else:
-            # Keep the whole prefix when comma parts are likely a category/use
-            # phrase rather than a modifier list.
+
+
             prefix = " ".join(segs)
     prefix = _re.sub(r"[^a-z0-9.&' -]+", " ", prefix)
     prefix = _re.sub(r"\s+", " ", prefix).strip(" -")
@@ -7949,12 +7311,7 @@ def _webshop_compact_query(task: str) -> str:
         if len(kept) >= 4:
             break
 
-    # Add a small number of visible high-signal descriptors for retrieval. This
-    # is not an ASIN/target hint; it just prevents over-broad queries such as
-    # `streaming media players` when the visible task says `dual band` +
-    # `quad core`.  Avoid `box spring` because WebShop has many visible
-    # distractors saying "No Box Spring Needed"; `queen size beds` is the safer
-    # retrieval phrase.
+
     try:
         descriptor_terms = []
         for ph in _webshop_visible_requirement_phrases(task):
@@ -7963,8 +7320,8 @@ def _webshop_compact_query(task: str) -> str:
                 continue
             if pn in _webshop_norm(prefix) or any(pn == _webshop_norm(x) for x in kept):
                 continue
-            # Exact option labels are already represented in kept; keep mostly
-            # semantic descriptors here.
+
+
             if len(pn.split()) <= 4:
                 descriptor_terms.append(ph)
         for ph in descriptor_terms[:5]:
@@ -7987,11 +7344,8 @@ def _webshop_compact_query(task: str) -> str:
 def _webshop_tokens(obs: str):
     import re as _re
     text = str(obs or "")
-    # WebShop observations use the literal "[SEP]" as the field separator.
-    # Product titles themselves often contain vertical bars ("|"), so splitting
-    # on "|" corrupts visible result rows/options and can make feedback prefer
-    # the wrong ASIN.  Only fall back to "|" for legacy traces that do not carry
-    # the explicit separator token.
+
+
     if "[SEP]" in text:
         parts = _re.split(r"\s*\[SEP\]\s*", text)
     else:
@@ -8000,7 +7354,7 @@ def _webshop_tokens(obs: str):
 
 
 def _webshop_parse_product_options(obs: str):
-    """Parse visible option groups from the current product page observation."""
+
     toks = _webshop_tokens(obs)
     low = [t.lower() for t in toks]
     if "buy now" not in low or "< prev" not in low:
@@ -8009,7 +7363,7 @@ def _webshop_parse_product_options(obs: str):
         start = low.index("< prev") + 1
     except ValueError:
         start = 0
-    # Product title is normally the token immediately before Price: ...
+
     title_idx = None
     for i, t in enumerate(low):
         if t.startswith("price:"):
@@ -8028,7 +7382,7 @@ def _webshop_parse_product_options(obs: str):
             groups.setdefault(current, [])
         elif current and tok.strip():
             groups.setdefault(current, []).append(tok.strip())
-    # De-duplicate while preserving visible order.
+
     for k, vals in list(groups.items()):
         seen, uniq = set(), []
         for v in vals:
@@ -8040,7 +7394,7 @@ def _webshop_parse_product_options(obs: str):
 
 
 def _webshop_parse_results(obs: str):
-    """Parse visible search-result rows as (asin, title, price)."""
+
     import re as _re
     toks = _webshop_tokens(obs)
     rows = []
@@ -8057,13 +7411,7 @@ def _webshop_parse_results(obs: str):
 
 
 def _webshop_visible_requirement_phrases(task: str) -> list[str]:
-    """Visible descriptor phrases that should influence result ranking.
 
-    These are extracted only from the user-visible instruction.  They are not
-    hidden WebShop attributes; they are common natural-language modifiers that
-    appear in titles/search snippets and help avoid buying a broad-category
-    distractor before an actually matching visible row.
-    """
     import re as _re
     t = _webshop_norm(task)
     phrases = []
@@ -8081,8 +7429,8 @@ def _webshop_visible_requirement_phrases(task: str) -> list[str]:
     for ph in known:
         if _webshop_has_phrase(t, ph):
             phrases.append(ph)
-    # Exact labeled option values can be useful in visible titles too, but keep
-    # them after semantic descriptors because they often appear only on product pages.
+
+
     for lab in ("color", "size", "fit type", "item shape", "shape", "scent", "flavor name", "flavor"):
         val = _webshop_task_attr_value(task, lab)
         vn = _webshop_norm(val)
@@ -8117,30 +7465,15 @@ def _webshop_recent_searches(env_self) -> list[str]:
 
 
 def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
-    """Heuristic visible-only scorer for result pages.
 
-    This does not read hidden goals; it only ranks the ASIN/title/price rows
-    already visible to the model. It is intentionally conservative and mainly
-    prevents obvious broad-word traps such as "Body Drench self-tanner" for a
-    "body lotion" request.
-    """
     import re as _re
     rows = _webshop_parse_results(obs)
     if not rows:
         return None
     avoid_asins = {str(a).strip().lower() for a in (avoid_asins or []) if str(a).strip()}
     price_limit = _webshop_price_limit(task)
-    # In the synthetic SkillRL/WebShop split, Lucene ranking with compact
-    # option-token queries is often more reliable than hand-written title
-    # semantics: target products can have odd titles (e.g. a T-shirt for a
-    # "dress shirt" goal) while exact options are only visible after opening.
-    # Prefer the first uninspected, in-budget visible row; use the heavier title
-    # scorer below only as a fallback.  This is still visible-only.
-    # Older diagnostic mode returned the first uninspected in-budget row here.
-    # That is too brittle for paper-style WebShop: visible result pages often
-    # contain obvious traps before a better matching row (wrong size, remote vs
-    # media player, t-shirt vs suit).  Keep Lucene order as a prior in the
-    # scorer below instead of short-circuiting the visible semantic checks.
+
+
     simple_rank_first = _env_flag("WEBSHOP_SIMPLE_RANK_FIRST", False)
     if simple_rank_first and _env_flag("WEBSHOP_SEARCH_RANK_FIRST", True):
         for row_i, (asin, title, price) in enumerate(rows[:12]):
@@ -8183,8 +7516,8 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
     has_task_options = any(_webshop_task_attr_value(task, lab) for lab in ("color", "size", "fit type", "item shape", "scent", "flavor"))
     task_is_mens = bool(_re.search(r"\b(men|men's|mens)\b", str(task).lower()))
     task_is_womens = bool(_re.search(r"\b(women|women's|womens)\b", str(task).lower()))
-    # Fashion result titles often expose a concrete size; if it contradicts the
-    # requested visible size, prefer another visible row/product page.
+
+
     size_token_re = _re.compile(
         r"\b(?:\d+w\s*x\s*\d+l|\d+w|\d+t|x-small|small|medium|large|x-large|xx-large|xxx-large|\d+x-large|\d+x)\b"
     )
@@ -8192,9 +7525,8 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
     best = None
     for row_i, (asin, title, price) in enumerate(rows[:12]):
         title_n = _webshop_norm(title)
-        # WebShop/Lucene ranking is a strong visible signal, especially with
-        # compact exact-token queries.  Prefer earlier rows unless there is a
-        # clear visible contradiction or price violation.
+
+
         score = -1.0 * row_i
         if asin in avoid_asins:
             score -= 12.0
@@ -8203,10 +7535,8 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
         if row_i == 0:
             score += 7.0
         if has_task_options and "multiple size color options" in title_n:
-            # Visible WebShop titles often hide exact variants behind a single
-            # product row.  For tasks with exact color/size options, this is a
-            # strong visible cue to open the product page instead of rejecting
-            # it because the option token is absent from the title.
+
+
             score += 12.0
         if task_is_mens and _re.search(r"\b(men|mens)\b", title_n):
             score += 3.0
@@ -8260,8 +7590,8 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
             pn = _webshop_norm(ph)
             if not pn:
                 continue
-            # Exact phrase first; then allow all constituent words for phrases
-            # such as `dry skin` where a target title may say `dry brush`.
+
+
             words = [w for w in pn.split() if len(w) >= 3]
             exact = _webshop_has_phrase(title_n, pn)
             partial = words and all(w in title_n for w in words)
@@ -8272,14 +7602,12 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
             elif any_word:
                 score += 1.5
                 matched_req += 0.3
-        # If many visible descriptors are requested but the title matches none,
-        # do not let low price or row-1 position dominate.  Keep the penalty
-        # moderate because some correct WebShop items have noisy titles and
-        # expose exact options only after opening.
+
+
         if req_phrases and matched_req == 0:
             score -= 4.0
 
-        # Common visible contradictions.
+
         if "body lotion" in task_n and "lotion" not in title_n:
             score -= 8.0
         if "body lotion" in task_n and any(x in title_n for x in ("self tanner", "deodorant", "cleansing milk", "body wash")):
@@ -8327,54 +7655,44 @@ def _webshop_best_visible_result(task: str, obs: str, avoid_asins=None):
                 score += 3.0
             elif size_token_re.search(title_n):
                 score -= 3.0
-        # Prefer earlier rows when scores tie.
+
         if best is None or score > best[0]:
             best = (score, asin, title, price)
     return best
 
 
 def _webshop_strong_guidance_enabled():
-    # Hard-off by default for auditable WebShop evaluation.  Old diagnostic
-    # runs used WEBSHOP_STRONG_GUIDANCE=1 to print concrete recommended
-    # actions; that is intentionally ignored unless an additional explicit
-    # opt-in is set, so stale shell env vars cannot accidentally enable it.
+
+
     return _env_flag("WEBSHOP_ALLOW_STRONG_GUIDANCE", False) and _env_flag("WEBSHOP_STRONG_GUIDANCE", False)
 
 
 def _webshop_env_feedback_enabled():
-    # Generic visible progress feedback for WebShop loops. It never names
-    # target metadata or reward; it only describes what the visible action
-    # history implies (same query/ASIN/Back loops are not making progress).
-    # OFF by default for SkillRL/AgentBench-aligned feedback; enable for
-    # diagnostic upper-bound runs with WEBSHOP_ENV_FEEDBACK=1.
+
+
     return _env_flag("WEBSHOP_ENV_FEEDBACK", False)
 
 
 def _webshop_exact_option_guard_enabled():
-    # Hard-off for the clean WebShop setting requested by the user.
-    # Previous diagnostic runs could enable this with WEBSHOP_EXACT_OPTION_GUARD=1
-    # to turn visible option parsing into stronger mismatch / readiness advice.
-    # We now keep exact-option handling in the learned skill/model behavior rather
-    # than an environment-side guard, so stale shell env vars cannot re-enable it.
+
+
     return False
 
 
 def _webshop_soft_exact_warning_enabled():
-    # Non-blocking, visible-only warning. OFF by default for paper-aligned
-    # WebShop feedback; only active inside the optional visible-state block.
+
+
     return _env_flag("WEBSHOP_SOFT_EXACT_WARNING", False)
 
 
 def _webshop_visible_state_feedback_enabled():
-    # Optional visible-only heuristic block that parses current page/results and
-    # suggests compact query/candidate/option information.  This is useful for
-    # diagnostics but is not part of the plain SkillRL/AgentBench environment
-    # feedback, so keep it OFF by default for aligned runs.
+
+
     return _env_flag("WEBSHOP_VISIBLE_STATE_FEEDBACK", False)
 
 
 def _webshop_prompt_style():
-    """WebShop prompt protocol: raw (local trained), skillrl, or agentbench."""
+
     val = os.environ.get("WEBSHOP_PROMPT_STYLE", "raw")
     val = str(val or "raw").strip().lower().replace("-", "_")
     aliases = {
@@ -8393,7 +7711,7 @@ def _webshop_skill_enabled():
 
 
 def _webshop_skill_placement():
-    # prefix: current local style; skillrl_memory: SkillRL-like Retrieved Relevant Experience; off: disable
+
     val = os.environ.get("WEBSHOP_SKILL_PLACEMENT", "prefix")
     val = str(val or "prefix").strip().lower().replace("-", "_")
     if val in {"0", "false", "none", "off", "no"}:
@@ -8404,7 +7722,7 @@ def _webshop_skill_placement():
 
 
 def _format_webshop_actions_dict(avail):
-    """AgentBench-style raw available-action dict."""
+
     if isinstance(avail, dict):
         return str({
             "has_search_bar": bool(avail.get("has_search_bar")),
@@ -8472,7 +7790,7 @@ def _render_webshop_prompt(
             action_history=action_history,
         )
 
-    # raw/local trained protocol. Keep the existing prefix skill path unless disabled.
+
     tip_prefix = (
         f"\n# Learned Strategy (follow this)\n{skill_text}\n\n"
         if skill_text and placement == "prefix" else ""
@@ -8505,15 +7823,7 @@ def _webshop_opened_asins(env_self):
 
 
 def _webshop_clicked_values(env_self, groups=None):
-    """Return option clicks for the *current* product page only.
 
-    Older feedback scanned the whole episode history, so option clicks from a
-    previous ASIN (or invalid values such as a pipe-split `brown`) were treated
-    as selected on the next ASIN.  That made the model buy partial/wrong items.
-    This helper walks backward until the latest product click/search/back and,
-    when current visible groups are available, keeps only exact visible option
-    values.
-    """
     import re as _re
     visible_norms = None
     if groups:
@@ -8535,19 +7845,19 @@ def _webshop_clicked_values(env_self, groups=None):
             val = a[6:-1].strip()
             vnorm = val.lower()
             if _re.fullmatch(r"b[0-9a-z]{9}", vnorm):
-                # Reached the current product-opening click; older option
-                # clicks belong to previous pages.
+
+
                 break
             if vnorm in _WEBSHOP_NAV_CLICKABLES:
                 continue
             nv = _webshop_norm(val)
             if visible_norms is not None and nv not in visible_norms:
-                # Do not count invalid/non-visible clicks as selected.
+
                 continue
             if val:
                 vals_rev.append(val)
     vals = list(reversed(vals_rev))
-    # De-duplicate while preserving order.
+
     out, seen = [], set()
     for v in vals:
         nv = _webshop_norm(v)
@@ -8557,14 +7867,14 @@ def _webshop_clicked_values(env_self, groups=None):
     return out
 
 def _webshop_option_suggestion(task: str, group: str, values, selected):
-    """Return (suggestion, reason) from visible task text and visible option values."""
+
     import re as _re
     task_l = _webshop_norm(task)
     selected_n = {_webshop_norm(x) for x in selected}
     vals = [str(v).strip() for v in values if str(v).strip()]
     if not vals:
         return None, ""
-    # If any value from this group was clicked, do not suggest another one.
+
     if any(_webshop_norm(v) in selected_n for v in vals):
         return None, "already selected"
 
@@ -8574,21 +7884,17 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
         return bool(_re.search(rf"(?<![a-z0-9]){_re.escape(word)}(?![a-z0-9])", task_l))
 
     def contains_phrase(phrase: str) -> bool:
-        # Avoid substring false positives such as option "7" matching a price
-        # phrase "70.00"; option values must align with normalized token
-        # boundaries in the visible task.
+
+
         return bool(_re.search(rf"(?<![a-z0-9]){_re.escape(phrase)}(?![a-z0-9])", task_l))
 
-    # "one" in WebShop goals often means 1pcs when size options are 1pcs/3pcs/5pcs.
+
     if group in {"size", "quantity", "pack", "count"} and contains_word("one"):
         for v, nv in norm_vals:
             if nv in {"1pcs", "1 pcs", "1pc", "1 pc", "1"} or nv.startswith("1pcs"):
                 return v, "task says one; visible size/count options include 1pcs"
 
-    # Exact labeled size/fit values must take priority over generic words in
-    # the broader product category.  Otherwise tasks like "men's t-shirts ...
-    # fit type: youth" incorrectly match the visible option `men`, and
-    # "size: 11.5" can be shortened to `11`.
+
     if group in {"size", "fit type"}:
         req_val = _webshop_task_attr_value(task, group)
         req_n = _webshop_norm(req_val)
@@ -8599,7 +7905,7 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
             if _webshop_exact_option_guard_enabled():
                 return None, f"task requests exact {group} `{req_val}` but no visible option exactly matches"
 
-    # Color groups: prefer exact single-color token over compound tokens.
+
     if group == "color":
         requested_color = _webshop_task_attr_value(task, "color")
         requested_color_n = _webshop_norm(requested_color)
@@ -8607,11 +7913,8 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
             for v, nv in norm_vals:
                 if nv == requested_color_n or contains_phrase(nv) and nv == requested_color_n:
                     return v, f"task requests exact color `{requested_color}` and matching visible option exists"
-            # Synthetic WebShop colors often include prefixes/digits
-            # (r.brown2070, blue137, c2-wine).  A generic option like "brown"
-            # is not an exact match for these values and usually yields only
-            # partial credit, so surface this as visible option absence rather
-            # than suggesting the broader color.
+
+
             simple_color = requested_color_n in _WEBSHOP_COLOR_WORDS
             if not simple_color and _webshop_exact_option_guard_enabled():
                 return None, f"task requests exact color `{requested_color}` but no visible color option exactly matches"
@@ -8625,15 +7928,13 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
             if contains:
                 return contains[0], f"task requests color `{color}`; closest visible color option"
 
-    # Exact phrase in task wins for non-labeled option groups (e.g. 60x40x40cm, woody scent, pecan).
-    # Labeled size/fit are handled above to avoid prefix/category false positives.
+
     if group not in {"size", "fit type"}:
         for v, nv in norm_vals:
             if nv and contains_phrase(nv):
                 return v, f"visible option phrase `{v}` appears in the task"
 
-    # Numeric/unit requirements: mention absence explicitly so the model avoids
-    # contradictory choices such as 60ML for a 120 ml task.
+
     unit_reqs = _re.findall(r"\b\d+(?:\.\d+)?\s*(?:ml|oz|ounce|ounces|cm|inch|count|pack|pcs|pc)\b", task_l)
     for req in unit_reqs:
         req_n = _webshop_norm(req)
@@ -8641,7 +7942,7 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
             if req_n == nv or req_n in nv:
                 return v, f"task requests `{req}` and matching visible option exists"
 
-    # Exact visible shape values (e.g. round/rectangular) should be selected.
+
     if group in {"item shape", "shape"}:
         req_val = _webshop_task_attr_value(task, "item shape") or _webshop_task_attr_value(task, "shape")
         req_n = _webshop_norm(req_val)
@@ -8652,25 +7953,25 @@ def _webshop_option_suggestion(task: str, group: str, values, selected):
             if _webshop_exact_option_guard_enabled():
                 return None, f"task requests exact {group} `{req_val}` but no visible option exactly matches"
 
-    # Scent/flavor exact words: if the group exists but no value matches, warn.
+
     if group in {"scent", "flavor name", "flavor", "flavour"}:
         cue_words = []
         for cue in ("scent", "flavor", "flavour"):
             if contains_word(cue):
                 cue_words.append(cue)
-        # Attribute values may be compound ("cinnamon paprika", "woody scent").
-        # Do not suggest an unrelated value just because a group exists.
+
+
         if cue_words:
             return None, f"task asks for {', '.join(cue_words)} but no visible option value exactly matches; avoid contradictory option values"
 
-    # If there is only one visible value and the task mentions this group, pick it.
+
     if len(vals) == 1 and group in task_l:
         return vals[0], f"only one visible {group} option"
     return None, ""
 
 
 def _webshop_missing_visible_exact_attrs(task: str, title: str, groups, selected) -> list[str]:
-    """List exact task attributes not visibly supported by the product page."""
+
     missing = []
     selected_text = " ".join(str(x) for x in (selected or []))
     option_text = " ".join(" ".join(vals) for vals in (groups or {}).values())
@@ -8688,8 +7989,8 @@ def _webshop_missing_visible_exact_attrs(task: str, title: str, groups, selected
         req = _webshop_task_attr_value(task, label)
         if not req:
             continue
-        # Simple broad colors may appear in the title; synthetic exact tokens
-        # must match as a phrase in title/options/selected history.
+
+
         if _webshop_has_phrase(visible_text, req):
             continue
         req_n = _webshop_norm(req)
@@ -8733,13 +8034,7 @@ def _append_webshop_neutral_env_feedback(env_self, obs: str, action_str: str, in
 
 
 def _build_webshop_visible_state_block(env_self, avail_actions) -> str:
-    """State-only WebShop feedback from visible task/page/history.
 
-    This block intentionally does *not* recommend a next action, rank visible
-    candidates, compute purchase readiness, or say which exact option should be
-    clicked.  It only restates parsed current state and action history that are
-    already visible to the policy, avoiding the earlier decision-helper style.
-    """
     task = str(getattr(env_self, "_task_description", "") or "")
     obs = str(getattr(env_self, "_current_obs", "") or "")
     groups, title = _webshop_parse_product_options(obs)
@@ -8830,7 +8125,7 @@ def _insert_webshop_visible_state_block(prompt: str, env_self, avail_actions) ->
 
 
 def _reset_react(self, question):
-    """ReAct 初始化 — 构建 SkillRL 风格的首步 prompt。"""
+
     from training.react_prompts import (
         ALFWORLD_TEMPLATE_NO_HIS,
         _ALFWORLD_EXAMPLE,
@@ -8842,7 +8137,7 @@ def _reset_react(self, question):
     self._extra = question.get("extra", {})
     self._step = 0
 
-    # 初始化 RAGEN 环境
+
     env_type = question.get("env_type", self._task_type)
     env_config = question.get("env_config", {})
     self._ragen_initial_obs = ""
@@ -8856,25 +8151,16 @@ def _reset_react(self, question):
     self._env_done = False
     self._env_reward = 0.0
 
-    # ReAct 历史
+
     self._react_history = []
-    # Keep raw WebShop [SEP] separators.  Many real WebShop option values
-    # contain a literal pipe, e.g. "brown | beige"; converting [SEP] to "|"
-    # corrupts visible option parsing and can make feedback think the wrong
-    # option was selected.  The raw [SEP] format also matches upstream WebShop.
+
+
     if self._task_type == "webshop":
         self._current_obs = str(self._ragen_initial_obs)
     else:
         self._current_obs = self._ragen_initial_obs
 
-    # 从可见 observation 中提取 task_description（和 SkillRL 一致）。
-    # Important for auditability: do not use ALFWorldEnv.task_description here,
-    # because that wrapper can be initialized from the game-file directory before
-    # reset.  In normal ALFWorld observations the instruction is visible as
-    # "Your task is to: ..."; if it is absent, fall back to the dataset question
-    # rather than hidden env metadata.
-    # WebShop obs 格式: "WebShop [SEP] Instruction: [SEP] {task} [SEP] Search"
-    # ALFWorld obs 格式: "... Your task is to: {task}"
+
     if self._task_type == "webshop" and " [SEP] " in self._ragen_initial_obs:
         parts = self._ragen_initial_obs.split(" [SEP] ")
         self._task_description = parts[2] if len(parts) >= 3 else str(question.get("question", ""))
@@ -8888,12 +8174,12 @@ def _reset_react(self, question):
     else:
         self._task_description = str(question.get("question", ""))
 
-    # 获取 available_actions
+
     avail = self._ragen_adapter.available_actions if self._ragen_adapter else []
 
-    # ── 检索相关 skills（论文 Eq.9: S_ret = TopK）──
+
     skill_text = ""
-    self._injected_skill_ids = []  # 追踪注入的 skill IDs（用于 F̂(s) 计算）
+    self._injected_skill_ids = []  
     _ws = self.workspace
     _ws_size = _ws.size if _ws else 0
     if (
@@ -8924,7 +8210,7 @@ def _reset_react(self, question):
         if self.skill_mode == "policy_action" else ""
     )
 
-    # 构建首步 prompt：WebShop can switch among local raw / SkillRL / AgentBench protocols.
+
     if self._task_type == "webshop":
         prompt = _render_webshop_prompt(
             init=True,
@@ -8949,10 +8235,8 @@ def _reset_react(self, question):
         prompt = _insert_alfworld_skill_trailer(prompt, self._task_description)
         prompt = _insert_alfworld_task_brief_and_memory(prompt, self, avail)
         prompt = _insert_alfworld_skill_apply_block(prompt, self, avail)
-        # Put the most actionable, state-specific guidance immediately before
-        # the final "choose one action" instruction.  The long retrieved skill is
-        # still useful, but late-step traces show the model often follows the
-        # most recent admissible-action block more than the skill prefix.
+
+
         if _alfworld_decision_block_enabled():
             decision_block = _build_alfworld_decision_state_block(self, avail)
             prompt = prompt.replace(
@@ -8966,14 +8250,14 @@ def _reset_react(self, question):
 
     self._current_prompt = prompt
 
-    # Trajectory
+
     traj = Trajectory(
         question=self._task_description,
         gold_answer=self._gold,
         task_type=self._task_type,
     )
 
-    # 论文 Eq.12: 记录 skill 注入为 Turn 0（用于 F̂(s) 计算）
+
     for sid in getattr(self, '_injected_skill_ids', []):
         from training.trajectory import Turn
         traj.add_turn(Turn(
@@ -8990,24 +8274,7 @@ def _reset_react(self, question):
 
 def _emit_alfworld_trace(env_self, turn, action_str, obs, reward, done, info,
                           loop_detected, loop_reason, prev_obs_at_decision):
-    """Black-box ReAct trace dump, one JSONL record per step.
 
-    Captures everything needed to reconstruct the model<->env interaction post-hoc:
-    - supervisor_input_tail: what was sent to the model (last 1500 chars of prompt)
-    - supervisor_output: raw model response
-    - action_str: parsed action
-    - prev_obs_at_decision: the obs the model was looking at when it chose this action
-    - history_tail: last 4 (obs, action) pairs as stored in _react_history
-    - result_obs: what env returned after env.step (or [REPEATED] if guard fired)
-    - admissible_after: env's admissible_commands after this step
-    - loop_blocked / loop_reason: did our guard fire
-    - reward / done / parse_error
-
-    Historically this was ALFWorld-only. Keep the function name for backward
-    compatibility, but also allow WebShop traces via WEBSHOP_TRACE_DIR or the
-    generic REACT_TRACE_DIR. The trace is written only after each env step and
-    is never fed back to the policy.
-    """
     import os, json, time
     task_type = getattr(env_self, "_task_type", "")
     if task_type == "alfworld":
@@ -9062,19 +8329,15 @@ def _emit_alfworld_trace(env_self, turn, action_str, obs, reward, done, info,
 
 
 def _react_step(self, full_content, action_str, traj):
-    """ReAct 一步交互。
 
-    Returns: (next_prompt, reward, done, info)
-    """
     from training.react_prompts import WEBSHOP_TEMPLATE, ALFWORLD_TEMPLATE
 
     self._step += 1
 
-    # capture obs the model was actually looking at when it chose this action
-    # (self._current_obs gets overwritten near end of _react_step)
+
     _prev_obs_at_decision = self._current_obs
 
-    # 构建 Turn
+
     turn = Turn(
         supervisor_input=self._current_prompt,
         supervisor_output=full_content or "",
@@ -9083,18 +8346,17 @@ def _react_step(self, full_content, action_str, traj):
         parse_error=(action_str is None),
     )
 
-    # 无效动作
+
     if action_str is None:
         turn.observation = "[INVALID] No valid <action> tag found."
         traj.turns.append(turn)
         _emit_alfworld_trace(self, turn, "<INVALID>", turn.observation,
                              0.0, False, {}, False, "parse_error",
                              _prev_obs_at_decision)
-        # 不终止 episode（SkillRL 行为），重用当前 prompt
+
         return self._current_prompt, 0.0, False, {"observation": turn.observation}
 
-    # Paper-aligned ReAct skill action: skill_invoke[skill_id].
-    # This is an internal SkillFlow action, not an external environment step.
+
     if str(action_str).strip().startswith("skill_invoke"):
         import re as _re
         m = _re.match(r"skill_invoke\[(.*?)\]", str(action_str).strip())
@@ -9116,11 +8378,7 @@ def _react_step(self, full_content, action_str, traj):
         self._current_prompt = next_prompt
         return next_prompt, 0.0, False, {"observation": obs, "skill_id": raw_sid}
 
-    # ── ALFWorld admissible-action guard ─────────────────────────────
-    # TextWorld silently returns "Nothing happens" for many invalid-but-plausible
-    # actions.  That feedback is too weak for this very instruction-following
-    # policy; instead, intercept non-admissible actions and return a precise
-    # state-aware correction before calling env.step().
+
     invalid_not_admissible = False
     semantic_blocked = False
     semantic_feedback = ""
@@ -9140,11 +8398,7 @@ def _react_step(self, full_content, action_str, traj):
             semantic_feedback = _build_alfworld_semantic_action_feedback(self, action_str, avail_now)
             semantic_blocked = bool(semantic_feedback)
 
-    # ── ReAct loop guard (codex-32 fix for ALFWorld 52/127 max_steps timeouts) ──
-    # If model just did this action AND last obs was "Nothing happens", or if
-    # model repeats the same action 3 times in a row, intercept BEFORE env.step
-    # to break the loop with stronger feedback. Saves env state but still consumes
-    # a step from max_episode_steps to prevent infinite loops.
+
     loop_detected = False
     loop_reason = ""
     if _alfworld_loop_guard_enabled() and self._react_history:
@@ -9179,7 +8433,7 @@ def _react_step(self, full_content, action_str, traj):
         )
         reward, done, info = 0.0, False, {"loop_blocked": True}
     else:
-        # 调用环境
+
         try:
             obs, reward, done, info = self._ragen_adapter.step(action_str)
         except Exception as e:
@@ -9194,26 +8448,25 @@ def _react_step(self, full_content, action_str, traj):
     turn.observation = str(obs)
     traj.turns.append(turn)
 
-    # black-box step trace (gated on ALFWORLD_TRACE_DIR env var)
+
     _emit_alfworld_trace(self, turn, action_str, obs, reward, done, info,
                          loop_detected, loop_reason, _prev_obs_at_decision)
 
-    # 更新历史
+
     self._react_history.append((self._current_obs, action_str))
-    # Keep raw [SEP] separators for WebShop; option values may contain '|'.
+
     if self._task_type == "webshop":
         self._current_obs = str(obs)
     else:
         self._current_obs = str(obs)
 
-    # 环境完成
+
     if done:
         self._env_done = True
         self._env_reward = reward
         if self._task_type == "webshop":
-            # WebShop has a graded official reward in [0, 1].  Do not convert
-            # any positive purchase reward into the generic 1.1 process reward,
-            # otherwise partial matches are over-counted as full successes.
+
+
             graded = float(reward or 0.0)
             traj.reward = graded
             traj.answer_reward = graded
@@ -9222,7 +8475,7 @@ def _react_step(self, full_content, action_str, traj):
             if str(self.reward_mode).lower() in {"outcome_only", "paper", "outcome"}:
                 traj.reward = 1.0
             else:
-                traj.reward = 1.0 + 0.1  # legacy R_answer + R_process
+                traj.reward = 1.0 + 0.1  
             traj.answer_reward = 1.0
             traj.r_tilde = max(traj.reward + self.epsilon_min, self.epsilon_min)
         else:
@@ -9232,7 +8485,7 @@ def _react_step(self, full_content, action_str, traj):
         traj.completed = True
         return "", traj.reward, True, info
 
-    # 超时
+
     if self._step >= self.max_episode_steps:
         traj.reward = 0.0
         traj.answer_reward = 0.0
@@ -9241,7 +8494,7 @@ def _react_step(self, full_content, action_str, traj):
         traj.truncated = True
         return "", 0.0, True, {"truncated": True}
 
-    # 构建下一步 prompt
+
     avail = self._ragen_adapter.available_actions if self._ragen_adapter else []
     next_prompt = _build_react_prompt(self, avail)
     self._current_prompt = next_prompt
@@ -9264,16 +8517,7 @@ _ALFWORLD_DECISION_REMINDERS = """Decision reminders (apply now):
 
 
 def _parse_alfworld_task(task_desc):
-    """Heuristic parse of ALFWorld task into (target_class, dest_class, source_hint, verb, count, examine_desklamp).
 
-    Handles common patterns:
-      - "heat/cool/clean some? <X> and put it in/on <Y>"
-      - "put <a|some|two|the> <X> (in|on) <Y>"
-      - "find two <X> and put them in/on <Y>"
-      - "examine (a|the) <X> with the desklamp"
-      - "Pick up <X> from <S> and put it in/on <Y>"
-    Best-effort; returns dict with possibly-None fields.
-    """
     import re
     out = {'target_class': None, 'dest_class': None, 'source_hint': None,
            'verb': None, 'count': 1, 'examine_with_desklamp': False}
@@ -9306,10 +8550,7 @@ def _parse_alfworld_task(task_desc):
         out.update(target_class=m.group(1), count=2, dest_class=m.group(2), verb=None)
         return out
 
-    # ALFWorld often phrases state-change goals adjectivally:
-    #   "put a clean kettle in cabinet", "put a cool cup in cabinet",
-    #   "put a hot/cooked egg on countertop".
-    # Treat these as clean/cool/heat requirements, not plain place tasks.
+
     m = re.search(r'put (?:a |some |the )?(?:(clean|washed|cool|cold|hot|heated|cooked) )?(\S+?)(?: \d)? (?:in/on|in|on) (\S+?)(?: \d)?$', s)
     if m:
         adjective, obj, dest = m.group(1), m.group(2), m.group(3)
@@ -9327,7 +8568,7 @@ def _parse_alfworld_task(task_desc):
 
 
 def _canonicalize_alfworld_action(action):
-    """Normalize common generated variants to TextWorld admissible syntax."""
+
     if action is None:
         return None
     import re
@@ -9346,16 +8587,7 @@ def _canonicalize_alfworld_action(action):
 
 
 def _alfworld_object_class(obj_name):
-    """Return the object class from an ALFWorld object instance string.
 
-    Examples:
-      "knife 1"       -> "knife"
-      "butterknife 1" -> "butterknife"
-      "cabinet 12"    -> "cabinet"
-
-    Keep this strict: substring matching makes tasks such as target=knife pick
-    up "butterknife", which is a wrong class in ALFWorld.
-    """
     if not obj_name:
         return ""
     import re
@@ -9372,7 +8604,7 @@ def _target_matches_obj(obj_name, target_class):
 
 
 def _alfworld_action_object(action):
-    """Extract the manipulated object instance from an ALFWorld action."""
+
     if not action:
         return ""
     import re
@@ -9415,12 +8647,12 @@ def _observation_mentions_object_class(text, target_class):
         return False
     import re
     t = re.escape(str(target_class).lower().strip())
-    # ALFWorld object mentions are normally "a <class> 1" or "<class> 1".
+
     return re.search(rf'\b{t}\s+\d+\b', str(text).lower()) is not None
 
 
 def _current_closed_open_options(current_obs, avail_actions):
-    """If the current observation says a receptacle is closed, return exact opens."""
+
     if not current_obs:
         return []
     import re
@@ -9448,13 +8680,7 @@ def _alfworld_open_options(avail_actions, limit=8):
 
 
 def _alfworld_source_priority(target_class, dest_class=None):
-    """Likely source-receptacle class order for ALFWorld exploration.
 
-    This is intentionally a soft prior used only when the exact target is not
-    visible.  It fixes a common failure mode where the policy follows the raw
-    admissible-action order (many cabinets first) and never checks high-yield
-    places such as sinkbasins/dining tables within 40 steps.
-    """
     t = str(target_class or "").lower().strip()
     d = str(dest_class or "").lower().strip()
     kitchenware = {
@@ -9476,15 +8702,14 @@ def _alfworld_source_priority(target_class, dest_class=None):
     if t == "newspaper":
         return ["coffeetable", "sofa", "armchair", "diningtable", "sidetable", "dresser", "desk", "shelf", "drawer", "cabinet"]
     if t == "tissuebox":
-        # Tissue boxes appear both in bathroom-style games (counter/sink/toilet
-        # area) and bedroom/living-room games.  Put open surfaces/furniture
-        # before long drawer runs, especially when drawer is the destination.
+
+
         return ["countertop", "sinkbasin", "toilet", "bathtubbasin", "dresser", "desk", "shelf", "sidetable", "coffeetable", "drawer", "cabinet"]
     if t == "toiletpaper":
         return ["toiletpaperhanger", "countertop", "toilet", "bathtubbasin", "sinkbasin", "shelf", "dresser", "cabinet", "drawer"]
     if t == "laptop":
-        # Bedroom/living electronics are usually on visible furniture.  Check
-        # those before getting pulled into long drawer/cabinet sequences.
+
+
         return ["dresser", "desk", "sidetable", "bed", "sofa", "armchair", "safe", "shelf", "drawer", "cabinet"]
     if t == "cellphone":
         return ["dresser", "sidetable", "bed", "desk", "sofa", "armchair", "safe", "shelf", "drawer", "cabinet"]
@@ -9499,11 +8724,8 @@ def _alfworld_source_priority(target_class, dest_class=None):
     if t == "candle":
         return ["countertop", "toilet", "bathtubbasin", "garbagecan", "sidetable", "diningtable", "shelf", "dresser", "drawer", "cabinet"]
     if t in {"pot", "pan", "kettle"}:
-        # For cookware the target is much more often sitting on an open kitchen
-        # surface (stove/sink/counter) than hidden in the long cabinet list.  If
-        # the goal destination is itself one of those surface classes, try that
-        # class first; otherwise the model tends to read "required destination"
-        # as irrelevant and falls into the cabinet loop before checking burners.
+
+
         primary = []
         if d in {"stoveburner", "sinkbasin", "countertop"}:
             primary.append(d)
@@ -9522,9 +8744,8 @@ def _alfworld_source_priority(target_class, dest_class=None):
     if t in food:
         return ["fridge", "countertop", "diningtable", "sinkbasin", "stoveburner", "toaster", "microwave", "cabinet", "drawer"]
     if t in {"dishsponge", "soapbottle", "spraybottle"}:
-        # Bathroom cleaning objects are often on sink/counter surfaces, but some
-        # games put spray/soap bottles on the garbagecan.  Check that visible
-        # bathroom receptacle before entering long cabinet/shelf/drawer runs.
+
+
         return ["sinkbasin", "countertop", "garbagecan", "cabinet", "shelf", "drawer"]
     if t in living:
         return ["sidetable", "coffeetable", "desk", "dresser", "sofa", "armchair", "shelf", "drawer"]
@@ -9553,19 +8774,12 @@ def _rank_alfworld_unvisited_go_options(
         recep = go_action[6:].strip()
         cls = _alfworld_object_class(recep)
         base = pri_index.get(cls, len(pri) + 5)
-        # When not holding the target, the destination class is often a
-        # distracting attractor ("put X in shelf" -> spend all budget checking
-        # shelves).  Penalize destination-class navigation slightly; exact
-        # target take actions still override this, and once holding the target
-        # destination navigation is handled by the held-target branch.
+
+
         if dest and cls == dest:
             if dest_penalty is None:
-                # Do not over-penalize destinations that are also high-yield
-                # source locations for the target.  Earlier versions delayed
-                # diningtable/countertop for knife/glassbottle/lettuce tasks and
-                # found the target only at step ~20.  Still demote low-yield
-                # destinations such as shelves/sidetables while the target is not
-                # held.
+
+
                 source_rank = pri_index.get(cls, len(pri) + 5)
                 penalty = 0 if source_rank <= 2 else (4 if source_rank <= 4 else 8)
             else:
@@ -9579,12 +8793,7 @@ def _rank_alfworld_unvisited_go_options(
 
 
 def _rank_alfworld_lamp_search_go_options(avail_actions, visited_receptacles, limit=8):
-    """Rank all unvisited navigation actions for desklamp search.
 
-    Desklamps are not only on desks/sidetables; in some bedrooms they appear on
-    shelves.  This fallback prevents the model from bouncing between already
-    visited desks after it has picked up the target.
-    """
     import re
 
     gos = [str(a) for a in (avail_actions or []) if str(a).startswith("go to ")]
@@ -9611,13 +8820,7 @@ def _rank_alfworld_lamp_search_go_options(avail_actions, visited_receptacles, li
 
 
 def _alfworld_source_focus_classes(target_class, dest_class=None):
-    """Return classes that should be exhausted before low-yield containers.
 
-    This is only used for prompt wording (not for filtering admissibility).  It
-    prevents one common ALFWorld failure mode: kitchenware tasks where the
-    admissible action list contains twenty cabinets, so the model copies cabinet
-    actions instead of first checking stoveburners/sinkbasins/countertops.
-    """
     t = str(target_class or "").lower().strip()
     d = str(dest_class or "").lower().strip()
     if t in {"pot", "pan", "kettle"}:
@@ -9667,7 +8870,7 @@ def _known_receptacles_with_object(visited_receptacles, obj_class, limit=6):
 
 
 def _extract_held_objects_from_actions(avail_actions, target_class=None):
-    """Infer likely held object(s) from admissible move/state actions."""
+
     import re
     held = []
     seen = set()
@@ -9679,11 +8882,8 @@ def _extract_held_objects_from_actions(avail_actions, target_class=None):
             if obj not in seen:
                 held.append(obj)
                 seen.add(obj)
-        # In desklamp tasks ALFWorld often lists only `examine <held target>`
-        # and `use desklamp`; no `move <target> to ...` action is available at
-        # the lamp location.  Treat an exact target examine action as held, but
-        # only when the caller supplies target_class; otherwise `examine desk 1`
-        # at an ordinary location would be misread as holding a desk.
+
+
         if target_class:
             m = re.match(r'^examine\s+(.+?)$', s, flags=re.IGNORECASE)
             if m:
@@ -9695,7 +8895,7 @@ def _extract_held_objects_from_actions(avail_actions, target_class=None):
 
 
 def _alfworld_state_action_done(env_self, parsed):
-    """Best-effort check whether required clean/heat/cool already happened."""
+
     verb = parsed.get("verb")
     target = parsed.get("target_class")
     if verb not in ("clean", "heat", "cool") or not target:
@@ -9729,12 +8929,7 @@ def _alfworld_exact_options(avail_actions, prefix=None, contains=None, limit=8):
 
 
 def _alfworld_placed_target_records(env_self, target_class, dest_class=None):
-    """Return successful-looking target placement records from action history.
 
-    For count>1 ALFWorld tasks, the required objects generally need to be placed
-    into the same destination instance.  Remember the first destination instance
-    so later objects are not scattered across `cabinet 1`, `cabinet 4`, ...
-    """
     if not target_class:
         return []
     records = []
@@ -9763,14 +8958,7 @@ def _alfworld_action_verb(action):
 
 
 def _build_alfworld_semantic_action_feedback(env_self, action_str, avail_actions):
-    """Block admissible-but-goal-damaging ALFWorld actions.
 
-    The admissible list may contain actions that are syntactically valid but
-    semantically wrong for the task, e.g. after making an egg hot, `cool egg with
-    fridge` can be listed next to the correct `move egg to fridge`.  For this
-    policy, a precise blocked-action message is better than allowing the state to
-    be destroyed and hoping the model recovers.
-    """
     parsed = _parse_alfworld_task(getattr(env_self, "_task_description", "") or "")
     target = parsed.get("target_class")
     dest = parsed.get("dest_class")
@@ -9886,9 +9074,7 @@ def _build_alfworld_semantic_action_feedback(env_self, action_str, avail_actions
             lines.append("Next response must be exactly one admissible action string that follows the task.")
             return "\n".join(lines)
 
-    # Never manipulate a different class with state-changing actions.  Allow
-    # `move wrong-object to ...` because that is how the policy drops a mistaken
-    # held object.
+
     if obj and not obj_is_target and action_verb in ("take", "clean", "cool", "heat"):
         lines = [
             f"[ACTION_BLOCKED_SEMANTIC] `{action}` is admissible, but it manipulates `{_alfworld_object_class(obj)}`.",
@@ -9951,7 +9137,7 @@ def _build_alfworld_semantic_action_feedback(env_self, action_str, avail_actions
 
 
 def _build_alfworld_decision_state_block(env_self, avail_actions):
-    """Compact, step-local ALFWorld state guidance placed near the final action."""
+
     parsed = _parse_alfworld_task(getattr(env_self, "_task_description", "") or "")
     target = parsed.get("target_class")
     dest = parsed.get("dest_class")
@@ -10213,10 +9399,7 @@ def _build_alfworld_decision_state_block(env_self, avail_actions):
                 if nav_opts:
                     lines.append("Exact destination navigation options now: " + " | ".join(nav_opts[:6]))
 
-    # Surface only context-appropriate target options.  Showing every
-    # target-related action can be actively harmful: after `heat egg`, ALFWorld
-    # may list both `cool egg with fridge` and the correct destination move.
-    # Because the model copies these lists, hide goal-damaging state actions.
+
     exact = []
     exact_note = "Context-appropriate target actions now: "
     if target:
@@ -10272,9 +9455,8 @@ def _build_alfworld_decision_state_block(env_self, avail_actions):
 
 
 def _build_alfworld_invalid_action_feedback(env_self, action_str, avail_actions):
-    # Neutral environment-manager feedback, modeled after RAGEN's
-    # "No valid action provided previously..." warning.  Do not parse the task,
-    # infer the target, suggest a next action, or reveal a state-machine policy.
+
+
     actions_preview = [str(a) for a in (avail_actions or []) if str(a) != "help"][:80]
     lines = [
         f"[INVALID_ACTION] `{action_str}` is not one of the current admissible actions.",
@@ -10288,16 +9470,7 @@ def _build_alfworld_invalid_action_feedback(env_self, action_str, avail_actions)
 
 
 def _append_alfworld_neutral_env_feedback(env_self, obs, action_str, info):
-    """Append non-planning ALFWorld execution feedback to the visible obs.
 
-    This intentionally does *not* inspect the task target, destination, hidden
-    state, or game file.  It only exposes generic execution facts already
-    implied by the environment interface: admissible-action membership and
-    TextWorld's no-effect "Nothing happens" signal.  For no-op/invalid actions
-    we may re-show the last model-visible observation because the environment
-    state is unchanged; this prevents the prompt from degrading to a bare
-    "Nothing happens" message.
-    """
     if not _alfworld_env_feedback_enabled():
         return str(obs)
 
@@ -10318,9 +9491,8 @@ def _append_alfworld_neutral_env_feedback(env_self, obs, action_str, info):
         return None
 
     def _last_visible_obs():
-        # Use only observations that were already visible to the model.  Skip
-        # synthetic no-op feedback so repeated invalid actions keep showing the
-        # real room state.
+
+
         candidates = [getattr(env_self, "_current_obs", "")]
         try:
             candidates.extend(obs0 for obs0, _act in reversed(getattr(env_self, "_react_history", []) or []))
@@ -10347,8 +9519,8 @@ def _append_alfworld_neutral_env_feedback(env_self, obs, action_str, info):
     if (action_is_valid is False or no_effect) and _alfworld_invalid_keep_state_enabled():
         prev_visible = _last_visible_obs()
         if prev_visible:
-            # Re-render the unchanged state before the generic feedback.  Keep it
-            # bounded so long object lists do not drown out admissible actions.
+
+
             if len(prev_visible) > 1200:
                 prev_visible = prev_visible[:1200].rstrip() + "..."
             text = "[STATE_UNCHANGED] Current visible state remains:\n" + prev_visible
@@ -10372,10 +9544,8 @@ def _append_alfworld_neutral_env_feedback(env_self, obs, action_str, info):
         )
 
     if _alfworld_visit_feedback_enabled():
-        # Neutral navigation feedback: expose visit repetition without parsing
-        # the task target or naming a next action.  This is a prompt-side
-        # rendering of the action/result history, intended to make
-        # "empty-location loops" visible.
+
+
         try:
             import re
             m = re.match(r"^\s*go to\s+(.+?)\s*$", str(action_str or ""), flags=re.I)
@@ -10404,12 +9574,7 @@ def _append_alfworld_neutral_env_feedback(env_self, obs, action_str, info):
 
 
 def _extract_visited_receptacles(react_history, current_obs):
-    """Walk history, return dict[receptacle_str -> {steps: [int], last_obs_short: str}].
 
-    A "receptacle" is the argument to a `go to ...` action. last_obs_short is the
-    observation seen AFTER arriving (= next history entry's pre_obs, or current_obs
-    for the most recent visit).
-    """
     visited = {}
     for j, (pre_obs, act) in enumerate(react_history):
         if not act or not str(act).startswith('go to '):
@@ -10428,9 +9593,7 @@ def _extract_visited_receptacles(react_history, current_obs):
 
 
 def _build_alfworld_progress_block(env_self, avail_actions):
-    """Construct a [PROGRESS CHECK] block summarizing visited receptacles, target,
-    and unvisited candidates. Returns empty string when not applicable.
-    """
+
     react_history = getattr(env_self, '_react_history', None) or []
     if len(react_history) < 4:
         return ""
@@ -10482,7 +9645,7 @@ def _build_alfworld_progress_block(env_self, avail_actions):
 
 
 def _build_react_prompt(self, avail_actions):
-    """构建带历史的 ReAct prompt（参考 SkillRL SimpleMemory.fetch）。"""
+
     from training.react_prompts import ALFWORLD_TEMPLATE, _ALFWORLD_EXAMPLE
     import os
 
@@ -10507,7 +9670,7 @@ def _build_react_prompt(self, avail_actions):
 
     history_lines = []
     if use_input_fixes:
-        # Fix 2: render history as Action -> Result so loops are visually obvious
+
         def _short_obs(x):
             s = str(x)
             max_chars = _alfworld_history_obs_chars()
@@ -10526,19 +9689,19 @@ def _build_react_prompt(self, avail_actions):
                 f"[Step {step_num}: Action: '{act}' -> Result: '{_short_obs(result_obs)}']"
             )
     else:
-        # Original (Obs, Action) format (used for webshop and as fallback)
+
         for j, (obs, act) in enumerate(recent):
             step_num = start_idx + j + 1
             history_lines.append(f"[Observation {step_num}: '{obs}', Action {step_num}: '{act}']")
     action_history = "\n".join(history_lines)
 
-    # Fix 1: append [PROGRESS CHECK] block (alfworld only, after a few steps)
+
     if use_input_fixes and _alfworld_progress_block_enabled():
         progress_block = _build_alfworld_progress_block(self, avail_actions)
         if progress_block:
             action_history = action_history + "\n\n" + progress_block
 
-    # ── Skill exposure ──
+
     skill_text = ""
     policy_skill_catalog = (
         self._react_skill_catalog_for_policy_action(self._task_description)
@@ -10556,7 +9719,7 @@ def _build_react_prompt(self, avail_actions):
             tip_plan = getattr(tip, 'plan', '') or ''
             if tip_plan:
                 skill_text += f"- {tip_plan.strip()}\n"
-    # skill tip 放在 prompt 开头（注意力 + prefix cache 优化）
+
     tip_prefix = (
         f"\n# Learned Strategy (follow this)\n{skill_text.strip()}\n\n"
         if skill_text else ""
@@ -10591,8 +9754,8 @@ def _build_react_prompt(self, avail_actions):
         rendered = _insert_alfworld_skill_trailer(rendered, self._task_description)
         rendered = _insert_alfworld_task_brief_and_memory(rendered, self, avail_actions)
         rendered = _insert_alfworld_skill_apply_block(rendered, self, avail_actions)
-        # Fix 3: insert decision reminders just before "Now it's your turn"
-        # so the rule is in the model's most recent attention context.
+
+
         if _alfworld_decision_block_enabled():
             decision_block = _build_alfworld_decision_state_block(self, avail_actions)
             rendered = rendered.replace(
@@ -10606,8 +9769,7 @@ def _build_react_prompt(self, avail_actions):
 
 
 def _format_webshop_actions(avail):
-    """格式化 WebShop 的 available_actions（和 SkillRL env_manager.py 行 661 一致）。
-    格式: 每行一个 'action', 带引号和逗号。"""
+
     import re as _re
     actions = []
     if isinstance(avail, dict):
@@ -10618,14 +9780,14 @@ def _format_webshop_actions(avail):
             def _rank_clickable(x: str):
                 lx = x.strip().lower()
                 if _re.fullmatch(r"b[0-9a-z]{9}", lx):
-                    return (0, lx)          # product ASINs on result pages
+                    return (0, lx)          
                 if lx in {"buy now"}:
-                    return (2, lx)          # after product options
+                    return (2, lx)          
                 if lx in {"next >", "< prev"}:
-                    return (3, lx)          # page navigation
+                    return (3, lx)          
                 if lx in {"back to search", "search", "description", "features", "reviews"}:
-                    return (4, lx)          # low-information navigation/info tabs
-                return (1, lx)              # product-page option values
+                    return (4, lx)          
+                return (1, lx)              
             clickables = sorted(clickables, key=_rank_clickable)
         for item in clickables:
             actions.append(f"click[{item}]")
@@ -10633,12 +9795,12 @@ def _format_webshop_actions(avail):
         actions = [str(a) for a in avail]
     else:
         return str(avail)
-    # SkillRL 格式: "'action'," 每行一个
+
     return "\n".join(f"'{s}'," for s in actions)
 
 
 def _alfworld_go_options_for_class(avail_actions, cls, specific_instance=None, limit=8):
-    """Return exact listed `go to ...` actions for a receptacle class/instance."""
+
     out = []
     cls = str(cls or "").lower().strip()
     inst = str(specific_instance or "").lower().strip()
@@ -10659,13 +9821,7 @@ def _alfworld_go_options_for_class(avail_actions, cls, specific_instance=None, l
 
 
 def _alfworld_known_target_source_go_options(env_self, avail_actions, target_class, preferred_dest_instance="", limit=6):
-    """Visible-only return-to-source hints for count=2 tasks.
 
-    When the first target was visibly taken from `source X`, returning to that
-    same source area can be better than starting a generic unvisited search.
-    This uses only prior action strings/observations and current admissible
-    `go to ...` commands; it does not inspect hidden game state.
-    """
     if not target_class:
         return []
     sources = []
@@ -10689,18 +9845,10 @@ def _alfworld_known_target_source_go_options(env_self, avail_actions, target_cla
 
 
 def _order_alfworld_actions_for_prompt(avail_actions, env_self=None):
-    """Stable, auditable ordering of ALFWorld admissible actions for prompting.
 
-    This does not remove, invent, block, or rewrite any action.  It only moves
-    current subgoal-relevant *already admissible* strings earlier in the list so
-    the raw-action model is less likely to copy a drawer/shelf distractor from
-    the long unranked action block.  Inputs are limited to visible task text,
-    visible history, current observation, and current admissible actions.
-    """
     actions = [str(a) for a in (avail_actions or []) if str(a) != "help"]
-    # WebShop-clean alignment: do not dynamically rank admissible actions by
-    # target/source/task phase unless explicitly requested.  The current
-    # admissible list is still shown verbatim, just in the environment order.
+
+
     if not _env_flag("ALFWORLD_ORDER_ACTIONS", False):
         return actions
     if env_self is None or not actions:
@@ -10737,8 +9885,8 @@ def _order_alfworld_actions_for_prompt(avail_actions, env_self=None):
 
         if held_target:
             obj = held_target[0]
-            # If currently standing at a closed relevant appliance/destination,
-            # opening it is the prerequisite for the exact state/move action.
+
+
             relevant_closed = []
             relevant_classes = {c for c in (appliance, dest) if c}
             if parsed.get("examine_with_desklamp"):
@@ -10771,7 +9919,7 @@ def _order_alfworld_actions_for_prompt(avail_actions, env_self=None):
                 add(dest_moves)
                 add(_alfworld_go_options_for_class(actions, dest, limit=8))
         else:
-            # If the exact target is visible/takeable, that beats all search.
+
             if target:
                 target_take_opts = _alfworld_exact_options(actions, prefix=f"take {target.lower()} ", limit=12)
                 placed_objs = {obj.lower() for obj, _dst in placed_records}
@@ -10833,19 +9981,15 @@ def _order_alfworld_actions_for_prompt(avail_actions, env_self=None):
                             deferred_opens.append(op)
                         else:
                             immediate_opens.append(op)
-                    # Open the current container immediately only when it is a
-                    # source-focus class, or when no higher-priority source
-                    # navigation remains.  Otherwise avoid spending half the
-                    # budget opening low-yield cabinets/drawers before checking
-                    # visible high-yield source classes.
+
+
                     add(immediate_opens)
                     add(ranked_go)
                     add(deferred_opens)
             else:
                 add(closed_open_opts)
 
-        # Preserve all remaining official admissible commands in their original
-        # order for auditability and compatibility.
+
         add(actions)
         return priority
     except Exception:
@@ -10853,12 +9997,7 @@ def _order_alfworld_actions_for_prompt(avail_actions, env_self=None):
 
 
 def _format_retrieved_skill_memory(skill_text: str) -> str:
-    """Format our retrieved SkillFlow tip like SkillRL's memory block.
 
-    SkillRL injects a section named "Retrieved Relevant Experience" rather than
-    a late decision block.  Keep this purely declarative: no current-state
-    parsing, no suggested next action, no output rewriting.
-    """
     text = (skill_text or "").strip()
     if not text:
         return "No relevant skills found for this task."
@@ -10875,17 +10014,11 @@ def _format_retrieved_skill_memory(skill_text: str) -> str:
 
 
 def _format_alfworld_actions(avail):
-    """Format ALFWorld admissible actions as a clear one-action-per-line list.
 
-    A newline/comma-separated list is much easier for the raw-action policy to
-    copy than a dense bracketed string, and it does not add any information
-    beyond the official admissible commands.
-    """
     if isinstance(avail, list):
         return "\n".join(f"  '{a}'," for a in avail if a != "help")
     return str(avail)
 
 
-# Monkey-patch 到 GenericTaskEnvironment
 GenericTaskEnvironment.reset_react = _reset_react
 GenericTaskEnvironment.react_step = _react_step

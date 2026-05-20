@@ -1,15 +1,4 @@
-"""
-SkillCreator Ψ — 技能创建、细化、挖掘模块。
 
-采用 XSkill 的设计（2026 XSkill-Agent 论文）：
-  1. generate: 从单条轨迹提取可复用 SOP（GENERATE_SKILL_PROMPT）
-  2. merge: 将多个 SOP 合并为 per-type living document（MERGE_SKILL_PROMPT）
-  3. refine: 定期精炼 living document（SKILL_REFINE_PROMPT）
-  4. flow_guided_evolution: inter-episode 进化（EVOLUTION_SKILL_PROMPT）
-  5. backward_pattern_mine: 利用 I(t) 挖掘关键步骤
-
-所有技能生成由 M_exec（gpt-oss-120b）完成。
-"""
 
 from __future__ import annotations
 
@@ -33,7 +22,7 @@ from src.skills.skill_prompts import (
 from training.trajectory import Trajectory
 from training.flow_metrics import identify_top_importance_steps
 
-# TYPE_CHECKING 避免循环导入（BackwardPolicy 导入 trajectory，skill_creator 也导入 trajectory）
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from training.backward_policy import BackwardPolicy
@@ -41,17 +30,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────
-# 质量门控常量
-# ──────────────────────────────────────────────────────
-
 MIN_PLAN_WORDS = 20
 MAX_PLAN_WORDS = 200
 MAX_NAME_WORDS = 7
-EMBEDDING_SIM_THRESHOLD = 0.80   # 相似度超过此值则拒绝（去重）
+EMBEDDING_SIM_THRESHOLD = 0.80   
 
-# 在 tool-augmented 场景中，"verify"/"validate" 是合理操作
-# 仅保留真正空洞的模式
+
 _VAGUE_PATTERNS = [
     "gather information systematically",
     "collect all relevant data",
@@ -59,7 +43,7 @@ _VAGUE_PATTERNS = [
 
 
 def _trajectory_outcome_summary(*trajs: Trajectory) -> str:
-    """Summarize training outcomes without exposing gold answers to skill generation."""
+
     parts = []
     for i, traj in enumerate(trajs, 1):
         if traj is None:
@@ -73,22 +57,15 @@ def _trajectory_outcome_summary(*trajs: Trajectory) -> str:
 
 
 class SkillCreator:
-    """
-    Ψ(c, T, S) — 技能创建模块。
 
-    参数：
-      c: 当前任务配置
-      T: 触发条件（flow entropy / 轨迹分析）
-      S: 当前技能库
-    """
 
     def __init__(
         self,
         m_exec: MExec,
-        skill_workspace=None,  # SkillWorkspace（用于 ID 分配和去重）
+        skill_workspace=None,  
         backward_policy: "Optional[BackwardPolicy]" = None,
-        # P_φ（BackwardPolicy）— 用于 refine_by_counterfactual 的反事实评分
-        # 若为 None，refine_by_counterfactual 降级为纯失败案例描述（不含 logprob 分析）
+
+
     ):
         self.m_exec = m_exec
         self.workspace = skill_workspace
@@ -96,55 +73,36 @@ class SkillCreator:
 
     @staticmethod
     def _extract_field(block: str, field: str) -> Optional[str]:
-        """
-        从 M_exec 响应中提取字段值，兼容多种输出格式。
 
-        M_exec (gpt-oss-120b) 输出不稳定，同一 prompt 可能返回：
-          condition: "quoted text"       ← 双引号
-          condition: 'single quoted'     ← 单引号
-          condition: **markdown bold**   ← markdown bold
-          condition: bare text           ← 裸文本
-
-        按特异性降序尝试匹配，避免误捕获。
-        """
         import re
-        # 1. 双引号
+
         m = re.search(rf'{field}:\s*"([^"]+)"', block)
         if m:
             return m.group(1).strip()
-        # 2. 单引号
+
         m = re.search(rf"{field}:\s*'([^']+)'", block)
         if m:
             return m.group(1).strip()
-        # 3. Markdown bold
+
         m = re.search(rf'{field}:\s*\*\*(.+?)\*\*', block)
         if m:
             return m.group(1).strip()
-        # 4. 裸文本到行尾（最后手段）
+
         m = re.search(rf'{field}:\s*(.+)', block)
         if m:
             text = m.group(1).strip().strip('"\'*')
-            if len(text) > 5:  # 过滤太短的误匹配
+            if len(text) > 5:  
                 return text
         return None
 
     @staticmethod
     def _get_top_importance_indices(traj: Trajectory) -> set:
-        """
-        返回轨迹中对 TTB balance 贡献超过均匀份额的步骤索引。
 
-        GFlowNet TTB balance = log Z + Σ log I(t) - β log R̃。
-        每步对 balance 的贡献是 |log I(t)| = |fwd_logprob - bwd_logprob|。
-        一个步骤"重要"当且仅当它的贡献超过 1/T 的均匀份额（T = 轨迹长度）。
-
-        这个判据无固定超参数，直接从 GFlowNet flow balance 推导：
-        dominating the TTB error 的步骤就是 forward/backward 最失衡的步骤。
-        """
         if not traj.turns:
             return set()
         import math
         T = len(traj.turns)
-        # |log I(t)| = 每步对 TTB imbalance 的绝对贡献
+
         contributions = []
         for i, t in enumerate(traj.turns):
             imp = getattr(t, "step_importance", 1.0)
@@ -153,13 +111,10 @@ class SkillCreator:
         total_c = sum(c for _, c in contributions)
         if total_c < 1e-10:
             return set()
-        # 标注贡献超过 1/T 均匀份额的步骤
+
         uniform_share = total_c / T
         return {idx for idx, c in contributions if c > uniform_share}
 
-    # ──────────────────────────────────────────────
-    # 1. Genesis：S₀=∅ 自举
-    # ──────────────────────────────────────────────
 
     def extract_skills_from_trajectories(
         self,
@@ -168,26 +123,15 @@ class SkillCreator:
         task_type: str,
         target_count: int = 4,
     ) -> List[SkillEntry]:
-        """
-        XSkill 风格的 bottom-up skill extraction。
 
-        两阶段流程（直接借鉴 XSkill skill_builder.py）：
-        1. Per-trajectory SOP extraction：每条轨迹单独提取一个 SOP
-        2. Merge：将多个 SOP 合并为统一的 skill 集合
-
-        同时学习成功和失败：
-        - 成功轨迹 → generate_skill_for_trajectory（提取有效策略）
-        - 失败轨迹 → 结合 outcome/reward，总结可泛化的 pitfall
-        """
         if not high_trajs and not low_trajs:
             return []
 
-        # ── 阶段 1：Per-trajectory SOP extraction（XSkill: GENERATE_SKILL_PROMPT）──
-        # 配对成功+失败轨迹，同时输入让 M_exec 对比学习
-        per_traj_skills_raw = []  # 存储 raw SKILL.md 文本（用于 living document merge）
-        per_traj_skills = []  # 存储解析后的 SkillEntry（用于 fallback）
 
-        # 构建成功/失败配对
+        per_traj_skills_raw = []  
+        per_traj_skills = []  
+
+
         pairs = []
         max_pairs = min(target_count, 4)
         for i in range(max_pairs):
@@ -196,7 +140,7 @@ class SkillCreator:
             pairs.append((s, f))
 
         for s_traj, f_traj in pairs:
-            # 只传轨迹与 outcome/reward，不传 gold answer，避免训练标签写入技能。
+
             s_text = format_trajectory_for_skill_generation(s_traj)
             f_text = format_trajectory_for_skill_generation(f_traj)
 
@@ -214,7 +158,7 @@ class SkillCreator:
                 response = clean_skill_output(response)
                 per_traj_skills_raw.append(response)
 
-                # 也尝试解析为 SkillEntry（用于 quality gate 和 fallback）
+
                 parsed = parse_skill_blocks(response)
                 if parsed:
                     per_traj_skills.append(parsed[0])
@@ -229,10 +173,7 @@ class SkillCreator:
         if not per_traj_skills_raw:
             return []
 
-        # ── 阶段 2：Merge SOPs → Living Document（R2 模式：每次新鲜生成）──
-        # 不读旧文档 — 从当前轨迹的 SOPs 新鲜合并
-        # 原因：RL 训练中 policy 每步都在变，旧策略会与当前 policy 失配
-        # R2 实验证明：新鲜生成（existing=""）比增量 merge 效果好 28% vs 11%
+
         living_doc = self.merge_into_living_document(
             task_type=task_type,
             existing_document="",
@@ -244,7 +185,7 @@ class SkillCreator:
                 f"[SkillExtract] {task_type}: living document created "
                 f"({len(living_doc.split())} words)"
             )
-            # 存储 living document 到 workspace（如果有）
+
             if self.workspace:
                 from src.skills.format import TaskTypeSkillDocument
                 doc = TaskTypeSkillDocument(
@@ -255,7 +196,7 @@ class SkillCreator:
                 )
                 self.workspace.update_type_document(doc)
 
-        # 设置 metadata（对解析出的 SkillEntry）
+
         traj_ids = [t.traj_id for t in (high_trajs[:3] + low_trajs[:2]) if hasattr(t, 'traj_id')]
         for skill in per_traj_skills:
             skill.meta.source = "trajectory_extraction"
@@ -263,14 +204,11 @@ class SkillCreator:
             skill.meta.task_types = [task_type]
             skill.meta.trajectory_support = traj_ids
 
-        # Quality gate
+
         per_traj_skills = self._quality_gate(per_traj_skills, existing_skills=[])
         logger.info(f"[SkillExtract] {task_type}: {len(per_traj_skills)} skills after quality gate")
         return per_traj_skills[:target_count]
 
-    # ──────────────────────────────────────────────
-    # v2: Atomic Tip Extraction（ADD not MERGE）
-    # ──────────────────────────────────────────────
 
     def extract_atomic_tips(
         self,
@@ -279,16 +217,7 @@ class SkillCreator:
         task_type: str,
         max_tips: int = 3,
     ) -> List[SkillEntry]:
-        """
-        原子化 tip 提取。
 
-        vs extract_skills_from_trajectories：
-        - 生成 < 60 words 的 tip（不是 500 words SOP）
-        - 独立存储（不 merge 成 Living Doc）
-        - 每条 tip 是一个独立的 SkillEntry
-
-        Returns: list of SkillEntry（每条代表一个原子 tip）
-        """
         from src.skills.skill_prompts_v2 import (
             GENERATE_TIP_PROMPT, parse_tips_yaml
         )
@@ -299,13 +228,13 @@ class SkillCreator:
         if not high_trajs and not low_trajs:
             return []
 
-        # 构建成功/失败配对
+
         pairs = []
         n_pairs = min(max_tips, 3)
         for i in range(n_pairs):
             s = high_trajs[i % max(len(high_trajs), 1)] if high_trajs else low_trajs[0]
             f = low_trajs[i % max(len(low_trajs), 1)] if low_trajs else high_trajs[-1]
-            if s.traj_id != f.traj_id:  # 避免自我对比
+            if s.traj_id != f.traj_id:  
                 pairs.append((s, f))
 
         all_tips = []
@@ -355,24 +284,16 @@ class SkillCreator:
         logger.info(f"[TipExtract] {task_type}: {len(all_tips)} atomic tips extracted")
         return all_tips[:max_tips]
 
-    # ──────────────────────────────────────────────
-    # v2b: Flow-Driven Tip Generation from ObservationBuffer
-    # ──────────────────────────────────────────────
 
     def _call_tip_generator(self, prompt: str, max_tokens: int = 1000) -> str:
-        """Call the frozen Skill Creator LLM with retries.
 
-        The endpoint/model/key are configured through environment variables:
-        SKILL_CREATOR_API_BASE, SKILL_CREATOR_MODEL, SKILL_CREATOR_API_KEY.
-        No API key is hard-coded in the repository.
-        """
         import requests, re, time as _time
 
         api_base = os.environ.get("SKILL_CREATOR_API_BASE", "http://127.0.0.1:3456/v1/messages")
         api_key = os.environ.get("SKILL_CREATOR_API_KEY", "EMPTY")
         model = os.environ.get("SKILL_CREATOR_MODEL", "skill-creator-model")
         max_retries = 5
-        backoffs = [5, 15, 45, 120, 300]  # seconds
+        backoffs = [5, 15, 45, 120, 300]  
         last_err = None
 
         for attempt in range(max_retries):
@@ -393,7 +314,7 @@ class SkillCreator:
                     timeout=None,
                 )
                 raw = resp.text
-                # 代理返回 JSON error body (auth/timeout/ECONNRESET)
+
                 if '"type":"error"' in raw[:200]:
                     raise RuntimeError(f"Skill Creator error body: {raw[:300]}")
                 if "text_delta" in raw:
@@ -424,9 +345,6 @@ class SkillCreator:
                     logger.error(f"[TipGen] Skill Creator all {max_retries} attempts failed: {last_err}")
         raise RuntimeError(f"Skill Creator failed after {max_retries} retries: {last_err}")
 
-    # ──────────────────────────────────────────────
-    # v3: LLM-as-Curator — 两阶段 tip 管理
-    # ──────────────────────────────────────────────
 
     _TASK_TOOLS = {
         "multi_hop_qa": "search (find passages), lookup (find detail in passage), fact_verify, decompose",
@@ -447,20 +365,11 @@ class SkillCreator:
         high_flow_trajs=None,
         critical_steps=None,
         dag_comparisons=None,
-        # 3+2+1 新增参数
+
         bottleneck_diagnoses=None,
         counterfactual_pairs=None,
     ) -> dict:
-        """Two-phase tip curation via the frozen Skill Creator LLM.
 
-        Phase 1: curator reviews existing tips + evidence → KEEP/UPDATE/DELETE + needs_new_tip
-        Phase 2: If needed, generate ONE new tip
-
-        如果 bottleneck_diagnoses 存在，使用 3+2+1 结构化诊断 prompt；
-        否则 fallback 到原有的完整轨迹 prompt。
-
-        Returns: {"added": [SkillEntry], "updated": [(old_id, SkillEntry)], "deleted": [str], "skipped": bool}
-        """
         from src.skills.skill_prompts_v2 import (
             CURATE_TIPS_PROMPT, GENERATE_SINGLE_TIP_PROMPT,
             parse_curation_verdict, parse_single_tip,
@@ -469,7 +378,7 @@ class SkillCreator:
         result = {"added": [], "updated": [], "deleted": [], "skipped": False}
         tool_list = self._TASK_TOOLS.get(task_type, "search, analyze, python_execute")
 
-        # ── 格式化已有 tips ──
+
         existing_skills = workspace.get_by_task_type(task_type) if hasattr(workspace, 'get_by_task_type') else [
             s for s in workspace.get_all() if task_type in (s.meta.task_types or [])
         ]
@@ -482,7 +391,7 @@ class SkillCreator:
         else:
             existing_text = "(No tips exist yet for this task type.)"
 
-        # ── 格式化证据（控制长度，避免把个例细节写入技能）──
+
         def _format_traj(traj, label: str) -> str:
             lines = [f"{label} (R={traj.reward:.2f}, {len(traj.turns)} steps):"]
             for i, t in enumerate(traj.turns):
@@ -519,10 +428,10 @@ class SkillCreator:
 
         evidence_summary = (success_text + fail_text + critical_text + dag_text).strip() or "[no evidence]"
 
-        # ── Phase 1: Curation（3+2+1 诊断版 or 原版）──
+
         try:
             if bottleneck_diagnoses:
-                # 3+2+1 结构化诊断 prompt
+
                 from src.skills.skill_prompts_v2 import DIAGNOSE_AND_CURATE_PROMPT
                 diag_text = ""
                 for i, diag in enumerate(bottleneck_diagnoses):
@@ -561,7 +470,7 @@ class SkillCreator:
                 )
                 logger.info(f"[Curation] Using 3+2+1 diagnosis prompt for {task_type}")
             else:
-                # Fallback: 原版 prompt
+
                 curation_prompt = CURATE_TIPS_PROMPT.format(
                     task_type=task_type,
                     existing_tips=existing_text,
@@ -579,7 +488,7 @@ class SkillCreator:
             logger.warning(f"[Curation] Phase 1 failed for {task_type}: {e}")
             verdict = {"actions": [], "needs_new_tip": True, "new_tip_focus": "generate a useful strategy"}
 
-        # ── Execute verdict ──
+
         from src.skills.format import SkillEntry, SkillMeta
         import time as _time
 
@@ -632,11 +541,10 @@ class SkillCreator:
                 else:
                     logger.warning(f"[Curation] ADD action has insufficient body: {len((new_body or '').split())}w")
 
-        # ── Phase 2: Generate ONE new tip via separate LLM call if needed ──
-        # Skip Phase 2 if we already got ADD actions from the 3+2+1 verdict
+
         needs_phase2 = verdict.get("needs_new_tip", False)
         if not result["added"] and not existing_skills and bottleneck_diagnoses:
-            # Safety net: no tips exist, bottlenecks found, but no ADDs — force generation
+
             needs_phase2 = True
             logger.info(f"[Curation] Forcing Phase 2: workspace empty + bottlenecks detected")
 
@@ -696,30 +604,24 @@ class SkillCreator:
         observations: List[Dict],
         failed_trajectories: List[Trajectory],
         max_tips: int = 2,
-        # v3: flow 信号
+
         high_flow_trajs: Optional[List] = None,
         critical_steps: Optional[List[Dict]] = None,
         dag_comparisons: Optional[List[Dict]] = None,
     ) -> List[SkillEntry]:
-        """从 I(t)-selected observations 生成原子化 tips。
 
-        Skill-document design + GFlowNet flow 信号融合：
-        - 输入是 ObservationBuffer 中 I(t)<0.3 的关键步骤（紧凑，非完整轨迹）
-        - 1 次 M_exec 调用
-        - 输出为 SKILL.md 格式的 SkillEntry
-        """
         from src.skills.skill_prompts_v2 import (
             GENERATE_TIP_FROM_OBSERVATIONS_PROMPT, parse_tips_yaml
         )
 
-        # 格式化 observations（紧凑：每条 ~80 chars）
+
         obs_text = "\n".join(
             f"- [{o['action_type']}] \"{o['instruction']}\" "
             f"(I={o['I_t']:.2f}, step {o['step_position']}/{o['n_steps']}, R={o['traj_reward']})"
             for o in observations[:10]
         )
 
-        # 格式化失败轨迹对比（紧凑）
+
         fail_text = ""
         if failed_trajectories:
             for ft in failed_trajectories[:2]:
@@ -729,7 +631,7 @@ class SkillCreator:
                 ]
                 fail_text += f"Failed (R={ft.reward:.2f}):\n" + "\n".join(steps) + "\n"
 
-        # 按 task_type 提供可用工具列表（让 M_exec 知道有哪些工具可编排）
+
         _TASK_TOOLS = {
             "multi_hop_qa": "search (find passages), lookup (find detail in passage), fact_verify, decompose (break into sub-questions)",
             "factual_qa": "search (find passages), lookup (find detail), fact_verify",
@@ -738,11 +640,11 @@ class SkillCreator:
             "science_qa": "search, lookup, python_execute",
             "webshop": "search[query] (search items by keywords), click[element] (select product/option/Buy Now)",
             "alfworld": "go to X, take X from Y, put X in Y, put X on Y, open X, close X, clean X with sinkbasin, heat X with microwave, cool X with fridge, examine X, inventory, look",
-            "interactive_agent": "search_product, click, act",  # legacy
+            "interactive_agent": "search_product, click, act",  
         }
         tool_list = _TASK_TOOLS.get(task_type, "search, analyze, python_execute")
 
-        # v3: 高 flow 成功轨迹（对比）
+
         success_text = ""
         if high_flow_trajs:
             for st in high_flow_trajs[:2]:
@@ -752,14 +654,14 @@ class SkillCreator:
                 ]
                 success_text += f"Success (R={st.reward:.2f}):\n" + "\n".join(steps) + "\n"
 
-        # v3: I(t) 关键步骤
+
         critical_text = ""
         if critical_steps:
             critical_text = "Critical decision points (high I(t) from backward policy):\n"
             for cs in critical_steps[:5]:
                 critical_text += f"  Step {cs['step']}: {cs['action']} (I={cs['I_t']}, R={cs['from_reward']})\n"
 
-        # v3: DAG 同问题对比
+
         dag_text = ""
         if dag_comparisons:
             dag_text = "Same-question trajectory comparisons:\n"
@@ -768,7 +670,7 @@ class SkillCreator:
                 dag_text += f"    Success path: {' → '.join(dc['success_actions'][:4])}\n"
                 dag_text += f"    Failure path: {' → '.join(dc['failure_actions'][:4])}\n"
 
-        # 合并所有证据
+
         flow_evidence = ""
         if success_text:
             flow_evidence += f"\nHigh-flow success trajectories:\n{success_text}"
@@ -817,19 +719,11 @@ class SkillCreator:
             return []
 
     def _format_trajectory_for_extraction(self, traj: Trajectory) -> str:
-        """
-        格式化轨迹为 XSkill 风格（抽象化，隐藏具体题目数据）。
 
-        使用 skill_prompts.format_trajectory_for_skill_generation 统一格式。
-        保留兼容性：旧代码调用此方法时自动使用新格式。
-        """
         return format_trajectory_for_skill_generation(traj, hide_question=True)
 
     def _format_trajectory_for_extraction_legacy(self, traj: Trajectory) -> str:
-        """
-        [已废弃] 旧格式化方法，保留作参考。
-        问题：暴露过多 question/label 细节会导致生成过拟合的 skill。
-        """
+
         import math
         top_steps = self._get_top_importance_indices(traj)
 
@@ -865,22 +759,10 @@ class SkillCreator:
         exploration_trajectories: Optional[List[Trajectory]] = None,
         target_count: int = 12,
     ) -> List[SkillEntry]:
-        """
-        从空集 S₀=∅ 自举初始技能集。
 
-        流程：
-          Step 1: 分析 seed_questions 的多样性（task_types, patterns）
-          Step 2: 用 M_exec 分析探索轨迹（如果有）
-          Step 3: 生成 target_count 个覆盖所有 task_types 的初始技能
-
-        Args:
-            seed_questions: 每种 task_type 的种子样本
-            exploration_trajectories: 用 base model 跑的探索轨迹（可选）
-            target_count: 目标技能数量（12-16）
-        """
         logger.info(f"Starting genesis with {len(seed_questions)} seed questions")
 
-        # 分析任务类型分布
+
         task_types = list(set(q.get("task_type", "unknown") for q in seed_questions))
         task_type_examples: Dict[str, List[str]] = {t: [] for t in task_types}
 
@@ -889,13 +771,13 @@ class SkillCreator:
             if len(task_type_examples[tt]) < 3:
                 task_type_examples[tt].append(str(q.get("question", "")))
 
-        # 构建 genesis prompt
+
         prompt = self._build_genesis_prompt(task_type_examples, exploration_trajectories, target_count)
 
-        # 调用 M_exec 生成技能（带重试：如果首次解析失败，降低温度再试）
+
         all_skills = []
         for attempt in range(3):
-            temp = 0.7 - attempt * 0.2  # 0.7 → 0.5 → 0.3
+            temp = 0.7 - attempt * 0.2  
             logger.info(f"Calling M_exec for genesis skill generation (attempt {attempt+1}, temp={temp})...")
             response = self.m_exec.execute(prompt, max_tokens=6000, temperature=temp)
             logger.info(f"Genesis response length: {len(response)} chars, first 200: {response[:200]}")
@@ -910,12 +792,12 @@ class SkillCreator:
         skills = all_skills
         logger.info(f"Parsed {len(skills)} total skills from genesis")
 
-        # 设置 genesis 元数据（必须在 quality gate 之前，因为 grounding 检查依赖 source）
+
         for skill in skills:
             skill.meta.source = "genesis"
             skill.meta.creation_step = 0
 
-        # 质量检查 + 分配 ID
+
         skills = self._quality_gate(skills, existing_skills=[])
         assign_skill_id(skills, start=0)
 
@@ -928,10 +810,10 @@ class SkillCreator:
         trajectories: Optional[List[Trajectory]] = None,
         target_count: int = 12,
     ) -> str:
-        """构建 genesis 生成 prompt"""
+
         traj_analysis = ""
         if trajectories:
-            # 分析轨迹模式
+
             success_patterns = []
             failure_patterns = []
             for traj in trajectories[:20]:
@@ -1058,9 +940,6 @@ Focus on:
 
 Output all 12 skills now:"""
 
-    # ──────────────────────────────────────────────
-    # 2. Flow-guided Evolution
-    # ──────────────────────────────────────────────
 
     def flow_guided_evolution(
         self,
@@ -1073,15 +952,7 @@ Output all 12 skills now:"""
         struggling_types: Optional[List[str]] = None,
         proven_experiences: Optional[List[Dict]] = None,
     ) -> List[SkillEntry]:
-        """
-        Flow 触发的技能进化。
 
-        用 M_exec（gpt-oss-120b）分析低/高 flow 轨迹，生成新技能。
-        新增: struggling_types 聚焦进化方向，proven_experiences 提供已证实的 action rules。
-
-        Returns:
-            新生成的技能列表（未添加到 workspace，由调用者决定）
-        """
         if not low_flow_trajs and not high_flow_trajs:
             return []
 
@@ -1100,15 +971,13 @@ Output all 12 skills now:"""
         )
 
         response = self.m_exec.execute(prompt, max_tokens=5000, temperature=0.6)
-        # XSkill 风格清理：去除 emoji、markdown 格式问题
+
         response = clean_skill_output(response)
         import re as _re
         clean_response = _re.sub(r'\*{1,2}', '', response)
         new_skills = parse_skill_blocks(clean_response)
 
-        # 解析失败但 M_exec 确实生成了内容 → 用 M_exec 自己修正格式
-        # 根因：M_exec 在长 prompt 后倾向于用自由文本而非 YAML 格式
-        # 解决：让 M_exec 把自己的输出重新格式化为可解析的 YAML
+
         if not new_skills and len(response) > 100:
             logger.info(f"[Evolution] Parse failed, asking M_exec to reformat ({len(response)} chars)")
             reformat_prompt = (
@@ -1135,25 +1004,24 @@ Output all 12 skills now:"""
 
         logger.info(f"Parsed {len(new_skills)} candidate skills from evolution")
 
-        # 将触发此次进化的轨迹 IDs 作为新技能的 trajectory_support
-        # 这满足论文的 grounding 要求：技能的产生必须有轨迹证据支撑
+
         analyzed_traj_ids = list({
             t.traj_id for t in low_flow_trajs + high_flow_trajs
             if hasattr(t, "traj_id") and t.traj_id
         })
 
-        # 在质量门控前设置 source 和 trajectory_support，以便门控可以验证 grounding
+
         for skill in new_skills:
             skill.meta.source = "flow_evolution"
             skill.meta.creation_step = creation_step
-            # 用分析过的轨迹作为证据支撑（最多 10 条）
+
             if not skill.meta.trajectory_support:
                 skill.meta.trajectory_support = analyzed_traj_ids[:10]
 
-        # 质量检查（含 grounding 验证）
+
         new_skills = self._quality_gate(new_skills, existing_skills=current_skills)
 
-        # 分配 ID
+
         next_id = max(
             (int(s.meta.skill_id.replace("dyn_", "")) for s in current_skills
              if s.meta.skill_id.startswith("dyn_")),
@@ -1174,42 +1042,35 @@ Output all 12 skills now:"""
         struggling_types: Optional[List[str]] = None,
         proven_experiences: Optional[List[Dict]] = None,
     ) -> str:
-        """
-        构建进化 prompt — XSkill 风格（抽象化轨迹，不泄露具体数据）。
 
-        改进（vs 旧版）：
-        - 不传 gold_answer（防止训练标签进入技能库）
-        - 用 format_trajectory_steps_only 展示工具序列（抽象化）
-        - 传现有 skill titles 做去重（XSkill 和 SkillRL 共同做法）
-        """
-        # 传轨迹工具序列和 outcome/reward；不向技能生成器提供 gold answer。
+
         failure_section = ""
         for i, traj in enumerate(low_flow_trajs[:4]):
             full_info = format_trajectory_for_skill_generation(traj)
             failure_section += f"\nFailure {i+1}:\n{full_info}\n"
             failure_section += f"Outcome: reward={traj.reward:.3f}, status={'success' if traj.reward >= 0.5 else 'failure'}\n"
 
-        # 成功案例
+
         success_section = ""
         for i, traj in enumerate(high_flow_trajs[:4]):
             full_info = format_trajectory_for_skill_generation(traj)
             success_section += f"\nSuccess {i+1}:\n{full_info}\n"
             success_section += f"Outcome: reward={traj.reward:.3f}, status={'success' if traj.reward >= 0.5 else 'failure'}\n"
 
-        # 现有 skill titles（去重用）
+
         existing_titles = "\n".join(
             f"  - [{s.meta.skill_id}] {s.name}"
             for s in current_skills
         ) if current_skills else "  (none)"
 
-        # Proven Action Rules
+
         experience_section = ""
         if proven_experiences:
             experience_section = "\n### Proven Action Rules (from experience store)\n"
             for exp in proven_experiences[:8]:
                 experience_section += f"  - When: {exp['condition']}\n    Do: {exp['action']}\n"
 
-        # Struggling Types
+
         struggling_section = ""
         if struggling_types:
             struggling_section = (
@@ -1226,9 +1087,6 @@ Output all 12 skills now:"""
         )
         return prompt
 
-    # ──────────────────────────────────────────────
-    # 2b. XSkill Living Document: Merge + Refine
-    # ──────────────────────────────────────────────
 
     def merge_into_living_document(
         self,
@@ -1236,24 +1094,11 @@ Output all 12 skills now:"""
         existing_document: str,
         new_skill_contents: List[str],
     ) -> str:
-        """
-        XSkill MERGE_SKILL_PROMPT — 将多个 skill 合并为单一 living document。
 
-        "Think of the global skill as a living document. Each new skill brings
-        potential insights — your task is to integrate them thoughtfully, not mechanically."
-
-        Args:
-            task_type: 任务类型
-            existing_document: 已有的 living document 内容（空字符串 = 首次创建）
-            new_skill_contents: 新生成的 raw skill 文本列表
-
-        Returns:
-            合并后的 living document 文本
-        """
         if not new_skill_contents:
             return existing_document
 
-        # 格式化新 skills
+
         new_skills_text = ""
         for i, content in enumerate(new_skill_contents):
             new_skills_text += f"--- New Skill {i+1} ---\n{content}\n\n"
@@ -1286,24 +1131,7 @@ Output all 12 skills now:"""
         word_threshold: int = 1000,
         force_refine: bool = False,
     ) -> str:
-        """
-        XSkill SKILL_REFINE_PROMPT — 精炼 living document。
 
-        目标：
-        - 去除冗余
-        - 替换过于具体的内容为占位符
-        - 合并重复的 workflow
-        - 压缩到 ~600 词
-
-        Args:
-            task_type: 任务类型
-            document: 当前 living document 内容
-            word_threshold: 超过此词数才触发精炼
-            force_refine: 强制精炼（即使词数未超标）
-
-        Returns:
-            精炼后的 living document 文本
-        """
         if not document:
             return document
 
@@ -1338,27 +1166,17 @@ Output all 12 skills now:"""
 
         return document
 
-    # ──────────────────────────────────────────────
-    # 3. Backward Pattern Mining
-    # ──────────────────────────────────────────────
 
     def cross_trajectory_critique(
         self,
         high_flow_trajs: List[Trajectory],
         low_flow_trajs: List[Trajectory],
     ) -> List[Dict]:
-        """
-        XSkill 风格的跨轨迹对比分析 — 从 GFlowNet flow 分组的轨迹中提取 experiences。
 
-        对比高/低 flow 轨迹，利用 I(t) 标注关键步骤，提取 action-level 决策规则。
-
-        Returns:
-            List of {"condition": str, "action": str, "task_types": [str]}
-        """
         if not high_flow_trajs or not low_flow_trajs:
             return []
 
-        # 格式化高 flow 轨迹（成功案例）— ★ 由 TTB balance 贡献决定
+
         import math
         success_cases = []
         for traj in high_flow_trajs[:5]:
@@ -1379,7 +1197,7 @@ Output all 12 skills now:"""
                 + "\n".join(steps)
             )
 
-        # 格式化低 flow 轨迹（失败案例）
+
         failure_cases = []
         for traj in low_flow_trajs[:5]:
             top_steps = self._get_top_importance_indices(traj)
@@ -1430,15 +1248,10 @@ Output 3-5 rules now:"""
         logger.info(f"[Critique] Response length: {len(response)} chars")
         logger.info(f"[Critique] Response first 500 chars: {response[:500]}")
 
-        # 解析 experience 条目
-        # M_exec (gpt-oss-120b) 输出格式不稳定：
-        #   变体1: condition: "quoted text"
-        #   变体2: condition: **markdown bold**
-        #   变体3: **condition**: *italic text*
-        # 先清除所有 markdown 格式再解析，确保健壮性
+
         experiences = []
         import re
-        clean_response = re.sub(r'\*{1,2}', '', response)  # 清除 * 和 **
+        clean_response = re.sub(r'\*{1,2}', '', response)  
         blocks = re.split(r"---\s*\n", clean_response)
         for block in blocks:
             block = block.strip()
@@ -1466,16 +1279,12 @@ Output 3-5 rules now:"""
         trajectory: Trajectory,
         top_k: int = 3,
     ) -> List[Dict]:
-        """
-        找 I(t) 最高的 top-K 步骤，提取关键动作子序列作为候选 pattern。
 
-        用于 flow_guided_evolution 的辅助输入，揭示哪些"意外成功"的步骤最值得学习。
-        """
         top_steps = identify_top_importance_steps(trajectory, top_k=top_k)
         patterns = []
 
         for idx, importance in top_steps:
-            # 提取 ±1 窗口
+
             window_start = max(0, idx - 1)
             window_end = min(len(trajectory.turns), idx + 2)
             window = trajectory.turns[window_start:window_end]
@@ -1493,40 +1302,18 @@ Output 3-5 rules now:"""
 
         return patterns
 
-    # ──────────────────────────────────────────────
-    # 4. 反事实细化（对低 flow 技能）
-    # ──────────────────────────────────────────────
 
     def refine_by_counterfactual(
         self,
         skill: SkillEntry,
-        low_flow_invocations: List[Dict],  # 低 flow 时被调用的记录
+        low_flow_invocations: List[Dict],  
         creation_step: int = 0,
     ) -> Optional[SkillEntry]:
-        """
-        对 F̂(s) 低的技能，用 P_φ 反事实推理改写 pitfall 和 plan。
 
-        论文 §3.4：在每个技能调用点计算 P_φ(a'|H_t) 对候选替代动作 a'≠a_t，
-        高 P_φ 得分的替代动作代表反向流认为应该选择的操作。
-
-        完整实现流程（当 backward_policy 可用时）：
-          1. 对每条低 flow 调用记录（含 backward_context, action_text）：
-             a. 从记录中读取预先计算好的 log P_φ(a_t|H_t)（即 backward_logprob）
-             b. 用 M_exec 生成 3 个候选替代动作 a'（"如果不调用 skill，应该做什么？"）
-             c. 对每个 a' 计算 log P_φ(a'|H_t)，找出最优替代（P_φ 得分最高）
-             d. 如果 log P_φ(best_alt) > log P_φ(a_t)，说明 backward flow 认为
-                原动作次优 → 将最优替代纳入改写 prompt
-
-          2. 构建量化分析 prompt：包含 I(t)、logprob 对比、最优替代动作文本
-          3. 调用 M_exec 改写技能的 plan 和 pitfall
-
-        降级策略（backward_policy=None 或无 backward_context 字段时）：
-          仅基于 instruction/observation/reward 做文本分析，不含 P_φ 评分。
-        """
         if not low_flow_invocations:
             return None
 
-        # ── 步骤 1：P_φ 量化反事实分析 ─────────────────────────────────────
+
         counterfactual_analyses: List[Dict] = []
 
         if self.backward_policy is not None:
@@ -1540,7 +1327,7 @@ Output 3-5 rules now:"""
                 observation = inv.get("observation", "")
 
                 if not backward_context or not action_text:
-                    # 缺少必要字段，退回到文本描述
+
                     counterfactual_analyses.append({
                         "instruction": instruction[:100],
                         "observation": observation[:100],
@@ -1553,7 +1340,7 @@ Output 3-5 rules now:"""
                     })
                     continue
 
-                # 生成 3 个候选替代动作（问 M_exec：若不调用此 skill，应该做什么？）
+
                 alt_prompt = (
                     f"Context where a skill was invoked but led to poor outcome:\n"
                     f"  State context: {backward_context[:300]}\n"
@@ -1577,9 +1364,9 @@ Output 3-5 rules now:"""
                     logger.debug(f"M_exec alternative generation failed: {e}")
                     alt_actions = []
 
-                # 对每个替代动作计算 log P_φ(a'|H_t)，找出最优
+
                 best_alt: Optional[str] = None
-                best_alt_lp = backward_lp  # 仅保留优于原始动作的替代
+                best_alt_lp = backward_lp  
 
                 for alt in alt_actions:
                     try:
@@ -1603,9 +1390,9 @@ Output 3-5 rules now:"""
                     "best_alternative": best_alt,
                 })
 
-        # ── 步骤 2：构建改写 prompt ───────────────────────────────────────
+
         if counterfactual_analyses and self.backward_policy is not None:
-            # 有 P_φ 量化分析的完整 prompt
+
             analysis_lines = []
             for i, a in enumerate(counterfactual_analyses):
                 line = (
@@ -1641,7 +1428,7 @@ Output 3-5 rules now:"""
                 "4. Keep the same skill_id and name unchanged"
             )
         else:
-            # 降级：无 P_φ 时，仅基于文本失败描述
+
             analysis_text = "\n".join([
                 f"  - instruction='{inv.get('instruction', '')[:100]}', "
                 f"observation='{inv.get('observation', '')[:100]}', "
@@ -1698,14 +1485,14 @@ Output the refined skill now:"""
 
         if skills:
             refined = skills[0]
-            # 保持原始 ID 和统计信息
+
             refined.meta.skill_id = skill.meta.skill_id
             refined.meta.source = "backward_mining"
             refined.meta.creation_step = creation_step
             refined.meta.usage_count = skill.meta.usage_count
             refined.meta.success_count = skill.meta.success_count
-            refined.meta.task_types = skill.meta.task_types  # 保留原 task_types
-            # 用失败调用的轨迹 IDs 作为 grounding 证据
+            refined.meta.task_types = skill.meta.task_types  
+
             support_ids = list({
                 inv.get("traj_id", "") for inv in low_flow_invocations
                 if inv.get("traj_id")
@@ -1717,9 +1504,6 @@ Output the refined skill now:"""
 
         return None
 
-    # ──────────────────────────────────────────────
-    # 5. 成功蒸馏（对高 flow 技能）
-    # ──────────────────────────────────────────────
 
     def distill_high_flow_skill(
         self,
@@ -1728,24 +1512,11 @@ Output the refined skill now:"""
         skill_marginal_flows: Dict[str, float],
         creation_step: int = 0,
     ) -> Optional[SkillEntry]:
-        """
-        对 F̂(s) 高的技能，从高 flow 轨迹中蒸馏优质执行模式，强化 plan。
 
-        论文 §3.4：s'' = Distill(s, T_high_flow^(s))
-
-        分析高 flow 轨迹中该技能被成功调用的所有 invocation，
-        提取哪些步骤和指令表达方式导致了高 flow / 高奖励，
-        将这些模式蒸馏进 plan，使技能更精准地引导后续调用。
-
-        注意：
-          - 不改变技能名称和 skill_id（仅精炼 plan 和 trigger）
-          - distillation 的目标是"更精准"，而非"更通用"
-          - 调用成功率（success_count）和 flow_score 保持原值
-        """
         if not high_flow_trajectories:
             return None
 
-        # 收集该技能在高 flow 轨迹中的成功调用样本（含 I(t) 和 edge_flow 评分）
+
         successful_invocations: List[Dict] = []
         for traj in high_flow_trajectories:
             for t_idx, turn in enumerate(traj.turns):
@@ -1765,14 +1536,14 @@ Output the refined skill now:"""
                     })
 
         if not successful_invocations:
-            # 该技能在高 flow 轨迹中未被调用，无需蒸馏
+
             logger.debug(
                 f"distill_high_flow_skill: skill {skill.meta.skill_id} "
                 f"not invoked in high-flow trajectories, skipping"
             )
             return None
 
-        # 按 step_importance 降序排列，取前 6 条最具代表性的调用
+
         successful_invocations.sort(key=lambda x: x["step_importance"], reverse=True)
         top_invocations = successful_invocations[:6]
 
@@ -1845,13 +1616,13 @@ Output the distilled skill now:"""
 
         if parsed:
             distilled = parsed[0]
-            # 保持原始 ID 和全部统计信息不变，仅内容被蒸馏
+
             distilled.meta.skill_id = skill.meta.skill_id
             distilled.meta.source = "flow_evolution"
             distilled.meta.creation_step = creation_step
             distilled.meta.usage_count = skill.meta.usage_count
             distilled.meta.success_count = skill.meta.success_count
-            distilled.meta.task_types = skill.meta.task_types  # 保留原 task_types
+            distilled.meta.task_types = skill.meta.task_types  
             distilled.meta.flow_score = current_flow
             distilled.meta.trajectory_support = (
                 support_ids[:3] if support_ids else skill.meta.trajectory_support
@@ -1860,41 +1631,29 @@ Output the distilled skill now:"""
 
         return None
 
-    # ──────────────────────────────────────────────
-    # 质量门控
-    # ──────────────────────────────────────────────
 
     def _quality_gate(
         self,
         new_skills: List[SkillEntry],
         existing_skills: List[SkillEntry],
     ) -> List[SkillEntry]:
-        """
-        多层质量检查：
-          1. 结构完整性（validate()）
-          2. plan 词数范围 [20, 150]
-          3. 反模糊模式检测
-          4. embedding 去重（sim < 0.80 与现有技能）
-          5. batch 内去重
-        """
+
         passed = []
         seen_names = set(s.name.lower() for s in existing_skills)
 
         for skill in new_skills:
-            # 1. 基础验证
+
             valid, reason = skill.validate()
             if not valid:
                 logger.info(f"Skill rejected (validate): {skill.name} — {reason}")
                 continue
 
-            # 2. 名称去重（简单字符串）
+
             if skill.name.lower() in seen_names:
                 logger.info(f"Skill rejected (duplicate name): {skill.name}")
                 continue
 
-            # 3. grounding 检查：非 genesis 来源的技能必须有轨迹证据支撑（论文 §4.2）
-            #    genesis 阶段无轨迹，允许 trajectory_support=[]；
-            #    flow_evolution / backward_mining 来源的技能必须能追溯到真实轨迹
+
             if skill.meta.source not in ("genesis",) and not skill.meta.trajectory_support:
                 logger.info(
                     f"Skill rejected (no trajectory grounding): {skill.name} "
@@ -1902,7 +1661,7 @@ Output the distilled skill now:"""
                 )
                 continue
 
-            # 4. embedding 去重（简单词袋近似）
+
             if self._is_too_similar(skill, existing_skills + passed):
                 logger.info(f"Skill rejected (too similar): {skill.name}")
                 continue
@@ -1921,15 +1680,7 @@ Output the distilled skill now:"""
         others: List[SkillEntry],
         threshold: float = EMBEDDING_SIM_THRESHOLD,
     ) -> bool:
-        """
-        TF-IDF 向量化 + 余弦相似度去重（论文 §4.2）。
 
-        论文原文：sim(e_s_new, e_s) < δ_dup（embedding 余弦相似度）。
-        使用 sklearn TfidfVectorizer（n-gram (1,2)）作为轻量 embedding 近似，
-        相比词袋 Jaccard 更能捕捉短语级相似度。
-
-        降级策略（sklearn 不可用时）：退回到 Jaccard 相似度。
-        """
         if not others:
             return False
 
@@ -1945,15 +1696,15 @@ Output the distilled skill now:"""
             vectorizer = TfidfVectorizer(
                 ngram_range=(1, 2),
                 min_df=1,
-                sublinear_tf=True,  # TF 取对数，缓解高频词支配
+                sublinear_tf=True,  
             )
             tfidf_matrix = vectorizer.fit_transform(all_texts)
-            # skill_text（idx=0）与所有 other（idx=1..）的相似度
+
             sims = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
             return bool(np.any(sims > threshold))
 
         except ImportError:
-            # 降级：词袋 Jaccard（sklearn 未安装时保留原逻辑）
+
             logger.warning("sklearn not available; falling back to Jaccard similarity for dedup")
 
             def jaccard(text1: str, text2: str) -> float:
