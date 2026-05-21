@@ -101,14 +101,39 @@ export SKILL_CREATOR_MODEL=skill-creator-model
 export SKILL_CREATOR_API_KEY=EMPTY
 ```
 
-## Data Format
+## Dataset
 
-`configs/skillflow.yaml` expects:
+Prepared training data is hosted on Hugging Face:
+
+```text
+https://huggingface.co/datasets/beita6969/SkillFlow-Dataset
+```
+
+`configs/skillflow.yaml` expects the files at:
 
 ```text
 data/train_v3.json
 data/test_iid_v3.json
 ```
+
+If the dataset repository is private, authenticate first with `hf auth login`. Then download the hosted files into the repository data directory:
+
+```bash
+python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="beita6969/SkillFlow-Dataset",
+    repo_type="dataset",
+    local_dir="data",
+    allow_patterns=["train_v3.json", "test_iid_v3.json"],
+    endpoint="https://huggingface.co",
+    token=True,
+)
+PY
+```
+
+The dataset contains 3,507 training examples and 896 IID validation examples across code generation, WebShop, ALFWorld, mathematical reasoning, factual QA, science QA, and multi-hop QA.
 
 Each item should follow this schema:
 
