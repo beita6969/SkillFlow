@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import string
+from collections import Counter
 from typing import Callable, Dict, List, Optional, Tuple
 
 
@@ -31,15 +32,14 @@ def token_f1(pred: str, gold: str) -> float:
     if not pred_tokens or not gold_tokens:
         return 1.0 if pred_tokens == gold_tokens else 0.0
 
-    pred_set = set(pred_tokens)
-    gold_set = set(gold_tokens)
-    common = pred_set & gold_set
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    num_same = sum(common.values())
 
-    if not common:
+    if num_same == 0:
         return 0.0
 
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gold_tokens)
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gold_tokens)
     f1 = 2 * precision * recall / (precision + recall)
     return f1
 
