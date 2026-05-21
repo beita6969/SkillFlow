@@ -158,6 +158,16 @@ strategy_qa, code_generation, science_qa, interactive_agent
 
 If the configured training file is absent, `run_training.py` creates a minimal fallback dataset so the pipeline can be checked end to end.
 
+## Model Weights
+
+Merged Supervisor weights are hosted on Hugging Face:
+
+```text
+https://huggingface.co/beita6969/SkillFlow-Model
+```
+
+The uploaded model is the merged `checkpoint_step_0110` Supervisor `theta` LoRA on top of Qwen/Qwen3.5-9B. The training-time backward policy adapter is not merged into the inference model.
+
 ## Quick Start
 
 Start a frozen Executor service:
