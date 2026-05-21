@@ -133,7 +133,7 @@ snapshot_download(
 PY
 ```
 
-The paper-aligned dataset contains 3,372 training examples and 797 IID validation examples across code generation, WebShop, ALFWorld, mathematical reasoning, factual QA, science QA, and multi-hop QA. The IID validation split uses AIME 2026 for the AIME benchmark; the math training pool uses historical AIME problems from 1983-2025 to avoid training on the AIME 2026 validation items. The hosted files are intended for training and in-training IID validation, not the full 14-benchmark final evaluation suite.
+The paper-aligned dataset contains 3,500 training records and 797 IID validation examples across code generation, WebShop, ALFWorld, mathematical reasoning, factual QA, science QA, and multi-hop QA. The train split is balanced to 500 records per IID benchmark family; SWE-bench is oversampled from 372 unique non-validation SWE-bench Verified training instances to 500 training records. The IID validation split uses AIME 2026 for the AIME benchmark; the math training pool uses historical AIME problems from 1983-2025 to avoid training on the AIME 2026 validation items. The hosted files are intended for training and in-training IID validation, not the full 14-benchmark final evaluation suite.
 
 Each item should follow this schema:
 
