@@ -148,7 +148,7 @@ SKILL_REFINE_PROMPT = """You are a skill document architect. Refine the SKILL.md
    - Replace overly specific examples with generalizable patterns
    - Convert hardcoded values to placeholders (e.g., `[TARGET]`, `[QUERY]`, `[ENTITY]`)
    - Delete task-specific details or specific cases that don't apply to similar problems
-   - Remove any leaked training data (specific question text, answers, names)
+   - Remove case-specific training details (specific question text, answers, names)
 
 3. **Logical Consolidation**:
    - Merge workflows that share substantial overlap into variants

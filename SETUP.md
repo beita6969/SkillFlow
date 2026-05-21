@@ -3,11 +3,9 @@
 ## 1. 环境安装
 
 ```bash
-# 创建 conda 环境
 conda create -n vllm-prompt python=3.10 -y
 conda activate vllm-prompt
 
-# 安装依赖
 pip install -r requirements.txt
 ```
 
@@ -26,19 +24,16 @@ pip install -r requirements.txt
 - **M_exec**: gpt-oss-120b 或其他大模型 (冻结执行器)
 
 ```bash
-# 下载 Qwen3-8B（如果 HF cache 没有）
 huggingface-cli download Qwen/Qwen3-8B
 
-# 下载 bge-base-en-v1.5（语义搜索用）
 huggingface-cli download BAAI/bge-base-en-v1.5
 ```
 
 ## 3. 启动 vLLM 服务
 
 ```bash
-export SGLANG_API_KEY="<LOCAL_API_KEY>"  # 本地服务用；不要提交真实密钥
+export SGLANG_API_KEY="<LOCAL_API_KEY>"
 
-# Supervisor (Qwen3-8B + LoRA)
 CUDA_VISIBLE_DEVICES=<GPU_ID> vllm serve Qwen3-8B \
   --port 8005 \
   --max-model-len 16384 \
@@ -46,7 +41,6 @@ CUDA_VISIBLE_DEVICES=<GPU_ID> vllm serve Qwen3-8B \
   --max-lora-rank 64 \
   --api-key "$SGLANG_API_KEY"
 
-# M_exec (大模型执行器) - 在另一个 GPU 上
 CUDA_VISIBLE_DEVICES=<GPU_ID> vllm serve <model-name> \
   --port 8010 \
   --max-model-len 16384 \

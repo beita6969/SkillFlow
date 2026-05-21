@@ -345,7 +345,6 @@ for i, (_, row) in enumerate(df.iterrows()):
             "repo": repo,
             "instance_id": str(row.get("instance_id", "")),
             "base_commit": base_commit,
-            "test_patch": str(row.get("test_patch", ""))[:1000],
         }
     })
     if (i + 1) % 100 == 0:

@@ -6211,7 +6211,7 @@ class GenericTaskEnvironment:
             return (
                 f"Write a complete Python script to solve this problem. "
                 f"Print the final answer. Output ONLY the code inside a ```python block.\n\n"
-                f"For repository/SWE debugging, use small synthetic data and local imports; "
+                f"For repository/SWE diagnosis, use small synthetic data and local imports; "
                 f"do not rely on internet downloads or external example datasets.\n"
                 f"Problem: {original_question}\n"
                 f"{f'Hint: {hint}' if hint else ''}\n"

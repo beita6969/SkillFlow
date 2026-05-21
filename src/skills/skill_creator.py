@@ -913,8 +913,8 @@ constraint: "Maximum 5 steps. Answer must be a brief phrase, not a paragraph."
 ---
 
 ---
-name: "Code Generate-Test-Debug"
-description: "Write, test, debug iteratively (MapCoder/LDB pattern: code → test → fix with expected vs actual)"
+name: "Code Generate-Test-Repair"
+description: "Write, test, and repair iteratively (MapCoder/LDB pattern: code → test → fix with expected vs actual)"
 trigger: "Code generation: 'Complete the function', 'Write a function that'; HumanEval, MBPP"
 plan: |
   1. Use test_code to have M_exec write the function and run against test cases
@@ -933,7 +933,7 @@ DO NOT generate skills that only use analyze — combine multiple tools for bett
 
 Focus on:
 - Math: python_execute with sympy for symbolic + numerical verification (SBSC/ToRA pattern)
-- Code: test_code → debug with expected vs actual → re-test iteration (MapCoder/LDB pattern)
+- Code: test_code → repair with expected vs actual → re-test iteration (MapCoder/LDB pattern)
 - Multi-hop QA: decompose + search chains + lookup + fact_verify (IRCoT pattern)
 - Verification: verify_answer, cross_validate, self_consistency for high confidence
 - Cross-task: verification and iterative refinement strategies
