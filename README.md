@@ -4,20 +4,9 @@
 
 ### Flow-Driven Recursive Skill Evolution for Agentic Orchestration
 
-<p>
-  <strong>Mingda Zhang</strong>,
-  <strong>Haoran Luo</strong>,
-  <strong>Wenjin Liu</strong>,
-  <strong>Tiesunlong Shen</strong>,
-  <strong>Zikai Xiao</strong>,
-  <strong>Erik Cambria</strong>,
-  <strong>Xiaoying Tang</strong>
-</p>
-
 SkillFlow trains a tool-using LLM supervisor with flow matching, backward credit assignment, and a self-evolving skill library.
 
 <p>
-  <a href="https://github.com/beita6969/SkillFlow"><img alt="Code" src="https://img.shields.io/badge/Code-GitHub-black"></a>
   <a href="https://huggingface.co/beita6969/SkillFlow-Model"><img alt="Model Weights" src="https://img.shields.io/badge/Model_Weights-Hugging_Face-blue"></a>
   <a href="https://huggingface.co/datasets/beita6969/SkillFlow-Dataset"><img alt="Dataset" src="https://img.shields.io/badge/Dataset-Hugging_Face-yellow"></a>
 </p>
